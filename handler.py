@@ -52,8 +52,16 @@ def video_bytes(item):
 
 def handler(job):
     inp=(job or {}).get('input') or {}
+
+    # Lightweight readiness test: proves the Runpod worker/handler is alive
+    # without starting ComfyUI or allocating model VRAM.
+    if inp.get('healthcheck') is True:
+        return {'ok': True, 'service': 'h3-runpod-worker', 'version': '0.2.0'}
+
     wf=inp.get('workflow')
-    if not isinstance(wf,dict) or not wf: return {'error':'input.workflow is empty'}
+    if not isinstance(wf,dict) or not wf:
+        return {'error':'input.workflow is empty'}
+
     ensure_comfy(); restore_images(inp.get('images'))
     client='h3-runpod-'+uuid.uuid4().hex
     ans=_http('/prompt',{'prompt':wf,'client_id':client},timeout=30)
@@ -67,11 +75,12 @@ def handler(job):
         time.sleep(1)
     if hist is None: raise TimeoutError('ComfyUI workflow timeout')
     status=hist.get('status') or {}
-    if status.get('status_str')=='error': raise RuntimeError('ComfyUI workflow failed: '+json.dumps(status)[:3000])
+    if status.get('status_str')=='error':
+        raise RuntimeError('ComfyUI workflow failed: '+json.dumps(status)[:3000])
     item=find_video(hist.get('outputs') or {})
-    if not item: raise RuntimeError('Workflow completed but MP4/WebM/MOV was not found in ComfyUI history')
+    if not item:
+        raise RuntimeError('Workflow completed but MP4/WebM/MOV was not found in ComfyUI history')
     raw=video_bytes(item)
-    # Studio 1.1.1 accepts video_base64. Avoids requiring S3/object storage for first working build.
     return {'video_base64':base64.b64encode(raw).decode('ascii'),'filename':item.get('filename'),'bytes':len(raw)}
 
 runpod.serverless.start({"handler": handler})
