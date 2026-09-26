@@ -1,1 +1,13 @@
-
+{
+  "title": "MiniMax H3 Video Worker",
+  "description": "RunPod Serverless worker for H3 Video Studio using ComfyUI workflows and MiniMax H3 video models.",
+  "type": "serverless",
+  "category": "video",
+  "iconUrl": "https://dummyimage.com/100x100/5733ff/fff&text=H3",
+  "config": {
+    "runsOn": "GPU",
+    "containerDiskInGb": 50,
+    "gpuCount": 1,
+    "allowedCudaVersions": ["12.8","12.7","12.6","12.5","12.4"]
+  }
+}
