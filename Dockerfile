@@ -5,8 +5,6 @@ WORKDIR /workspace
 RUN git clone --depth 1 https://github.com/Comfy-Org/ComfyUI.git
 WORKDIR /workspace/ComfyUI
 RUN python3 -m pip install --break-system-packages --no-cache-dir -r requirements.txt runpod
-# H3 Studio's six model files are copied by BUILD_AND_PUSH.ps1 into build_context/models.
-COPY build_context/models/ /workspace/ComfyUI/models/
 COPY handler.py /workspace/handler.py
 WORKDIR /workspace
-CMD ["python3","/workspace/handler.py"]
+CMD ["python3","-u","/workspace/handler.py"]
