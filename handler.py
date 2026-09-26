@@ -74,5 +74,4 @@ def handler(job):
     # Studio 1.1.1 accepts video_base64. Avoids requiring S3/object storage for first working build.
     return {'video_base64':base64.b64encode(raw).decode('ascii'),'filename':item.get('filename'),'bytes':len(raw)}
 
-if __name__=='__main__':
-    runpod.serverless.start({'handler': handler})
+runpod.serverless.start({"handler": handler})
