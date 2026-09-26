@@ -75,5 +75,4 @@ def handler(job):
     return {'video_base64':base64.b64encode(raw).decode('ascii'),'filename':item.get('filename'),'bytes':len(raw)}
 
 if __name__=='__main__':
-    ensure_comfy()
-    runpod.serverless.start({'handler':handler})
+    runpod.serverless.start({'handler': handler})
