@@ -3,7 +3,7 @@
     {
       "name": "validation_empty_workflow",
       "input": {
-        "workflow": {}
+        "healthcheck": true
       },
       "timeout": 10000
     }
@@ -11,6 +11,12 @@
   "config": {
     "gpuTypeId": "NVIDIA GeForce RTX 4090",
     "gpuCount": 1,
-    "allowedCudaVersions": ["12.8","12.7","12.6","12.5","12.4"]
+    "allowedCudaVersions": [
+      "12.8",
+      "12.7",
+      "12.6",
+      "12.5",
+      "12.4"
+    ]
   }
 }
