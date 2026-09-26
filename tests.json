@@ -1,0 +1,15 @@
+{
+  "tests": [
+    {
+      "name": "worker_validation",
+      "input": {
+        "workflow": {},
+        "images": {},
+        "h3": {
+          "mode": "validation"
+        }
+      },
+      "timeout": 10000
+    }
+  ]
+}
