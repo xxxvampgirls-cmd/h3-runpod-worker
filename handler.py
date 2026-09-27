@@ -210,7 +210,16 @@ def handler(job):
     resolution=str(h3.get('resolution') or '').lower()
     # 480p long mode: try one native continuous H3 pass (better dialogue/lip continuity).
     # Higher resolutions stay on the safe segmented path for 32 GB GPUs.
-    if duration > 5 and resolution != '480p':
+    # Native long generation on large-VRAM GPUs (RTX PRO 6000 96GB / H100-class and above).
+    # 32GB workers keep the safe segmented fallback at >480p.
+    try:
+        import torch
+        gpu_vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3) if torch.cuda.is_available() else 0
+    except Exception:
+        gpu_vram_gb = 0
+    native_long = resolution == '480p' or gpu_vram_gb >= 60
+    print(f"H3 mode: duration={duration}s resolution={resolution} vram={gpu_vram_gb:.1f}GB native_long={native_long}", flush=True)
+    if duration > 5 and not native_long:
         import copy, math, tempfile
         seg_count=max(2, math.ceil(duration/5))
         work=pathlib.Path(tempfile.mkdtemp(prefix='h3_segments_'))
