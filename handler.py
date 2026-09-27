@@ -222,8 +222,15 @@ def handler(job):
     max_speed = h3.get('max_speed', True) is not False
     if max_speed:
         target_steps = 6
-        # Match every scheduler node instead of relying on hard-coded IDs.
+        # Match the Turbo LoRA to the sampler step count. Using an 8-step LoRA
+        # with a 4-step scheduler is both slower/wasteful and can hurt motion quality.
+        turbo4 = 'minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors'
         for nid,node in wf.items():
+            if node.get('class_type') == 'LoraLoaderModelOnly':
+                inputs = node.setdefault('inputs', {})
+                for key in ('lora_name','lora'):
+                    if key in inputs and isinstance(inputs[key], str) and 'minimax_h3' in inputs[key].lower():
+                        inputs[key] = turbo4
             if node.get('class_type') == 'BasicScheduler':
                 node.setdefault('inputs', {})['steps'] = target_steps
         # Insert TeaCache between the final model producer and each BasicGuider.
