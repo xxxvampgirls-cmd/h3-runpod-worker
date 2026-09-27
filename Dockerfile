@@ -5,8 +5,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     COMFY_DIR=/workspace/ComfyUI \
     H3_COMFY_PORT=8188 \
-    HF_HOME=/runpod-volume/hf-cache \
-    H3_MODEL_ROOT=/runpod-volume/h3-models
+    HF_HOME=/runpod-volume/huggingface-cache \
+    H3_MODEL_ROOT=/workspace/h3-runtime-models
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip git curl ffmpeg ca-certificates \
@@ -19,10 +19,8 @@ WORKDIR /workspace/ComfyUI
 RUN python3 -m pip install --break-system-packages --no-cache-dir \
     -r requirements.txt runpod "huggingface_hub[cli]"
 
-# IMPORTANT: H3 weights are intentionally NOT baked into this image.
-# RunPod's 30-minute managed build timeout was being hit while exporting a ~44 GB image.
-# handler.py downloads the six files once into /runpod-volume/h3-models and symlinks
-# them into ComfyUI. With a Serverless Network Volume, later workers reuse them.
+# H3 base weights are supplied by RunPod's Serverless Hugging Face Model Cache.
+# Only the small Turbo LoRAs are fetched by the worker when needed; no paid Network Volume is required.
 COPY handler.py /workspace/handler.py
 WORKDIR /workspace
 CMD ["python3","-u","/workspace/handler.py"]
