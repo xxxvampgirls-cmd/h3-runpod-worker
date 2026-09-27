@@ -228,8 +228,12 @@ def handler(job):
         gpu_vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3) if torch.cuda.is_available() else 0
     except Exception:
         gpu_vram_gb = 0
-    native_long = resolution == '480p' or gpu_vram_gb >= 60
-    print(f"H3 mode: duration={duration}s resolution={resolution} vram={gpu_vram_gb:.1f}GB native_long={native_long}", flush=True)
+    # 15s 768p QUALITY still OOMs on RTX PRO 6000 96GB (94.97 GiB device limit).
+    # Keep high-resolution long clips on the proven 5s segmented path.
+    # Native long is reserved for 480p until a lower-memory native workflow is validated.
+    native_long = resolution == '480p'
+    mode = 'native' if native_long else ('segmented' if duration > 5 else 'native-short')
+    print(f"H3 mode: duration={duration}s resolution={resolution} vram={gpu_vram_gb:.1f}GB mode={mode}", flush=True)
     if duration > 5 and not native_long:
         import copy, math, tempfile
         seg_count=max(2, math.ceil(duration/5))
