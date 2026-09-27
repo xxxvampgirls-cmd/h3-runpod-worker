@@ -38,6 +38,31 @@ def _cached_snapshot(repo_id):
                 return snaps[0]
     return None
 
+def model_cache_diagnostics():
+    """Return safe filesystem hints so we can locate RunPod's injected HF model cache."""
+    roots=['/runpod-volume','/workspace','/root/.cache','/models','/model']
+    found=[]
+    needles=('minimax','h3','huggingface','models--comfy-org')
+    for root in roots:
+        p=pathlib.Path(root)
+        if not p.exists():
+            continue
+        try:
+            for base, dirs, files in os.walk(p):
+                rel_depth=len(pathlib.Path(base).parts)-len(p.parts)
+                if rel_depth > 5:
+                    dirs[:] = []
+                    continue
+                low=base.lower()
+                hits=[x for x in files if any(n in x.lower() for n in needles)]
+                if any(n in low for n in needles) or hits:
+                    found.append({'path':base,'files':hits[:20]})
+                    if len(found)>=80:
+                        return found
+        except Exception as e:
+            found.append({'path':root,'error':type(e).__name__})
+    return found
+
 def ensure_models():
     """Use RunPod Model Store for the large H3 base repo; fetch only the two Turbo LoRAs."""
     MODEL_ROOT.mkdir(parents=True, exist_ok=True)
@@ -112,7 +137,7 @@ def preflight():
     missing_nodes=sorted(REQUIRED_NODES-set(info.keys()))
     return {'ok':not missing_nodes,'stage':'ready' if not missing_nodes else 'nodes',
             'models':len(REQUIRED_MODELS),'missing_nodes':missing_nodes,
-            'service':'h3-runpod-worker','version':'0.5.0'}
+            'service':'h3-runpod-worker','version':'0.5.1'}
 
 def restore_images(items):
     d=COMFY_DIR/'input'; d.mkdir(parents=True,exist_ok=True)
@@ -138,7 +163,15 @@ def video_bytes(item):
 def handler(job):
     inp=(job or {}).get('input') or {}
     if inp.get('healthcheck') is True:
-        return {'ok':True,'service':'h3-runpod-worker','version':'0.5.0','models_required':len(REQUIRED_MODELS),'model_root':str(MODEL_ROOT),'base_model_store':BASE_REPO}
+        return {'ok':True,'service':'h3-runpod-worker','version':'0.5.1','models_required':len(REQUIRED_MODELS),'model_root':str(MODEL_ROOT),'base_model_store':BASE_REPO}
+    if inp.get('diagnose_model_cache') is True:
+        return {
+            'ok': True,
+            'service': 'h3-runpod-worker',
+            'version': '0.5.1',
+            'env_hints': {k:v for k,v in os.environ.items() if any(x in k.upper() for x in ('MODEL','HF_','HUGGING','RUNPOD')) and 'TOKEN' not in k.upper() and 'KEY' not in k.upper() and 'SECRET' not in k.upper()},
+            'paths': model_cache_diagnostics()
+        }
     if inp.get('preflight') is True:
         return preflight()
 
