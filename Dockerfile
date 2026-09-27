@@ -1,4 +1,4 @@
-FROM nvidia/cuda:13.0.2-cudnn-runtime-ubuntu24.04
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -19,10 +19,10 @@ WORKDIR /workspace/ComfyUI
 RUN python3 -m pip install --break-system-packages --no-cache-dir \
     -r requirements.txt runpod "huggingface_hub[cli]" \
     && python3 -m pip install --break-system-packages --no-cache-dir --force-reinstall \
-       --index-url https://download.pytorch.org/whl/cu130 \
-       torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0
+       --index-url https://download.pytorch.org/whl/cu128 \
+       torch torchvision torchaudio
 
-# Blackwell/RTX 50 optimization prerequisites. cu130 enables optimized CUDA kernels.
+# Optional optimization prerequisites; runtime stays on RunPod-compatible CUDA 12.8.
 RUN python3 -m pip install --break-system-packages --no-cache-dir \
     "triton>=3.6" "nvidia-cutlass-dsl>=4.5" cuda-python apache-tvm-ffi
 
