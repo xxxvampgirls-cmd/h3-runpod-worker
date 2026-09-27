@@ -140,7 +140,7 @@ def preflight():
     missing_nodes=sorted(REQUIRED_NODES-set(info.keys()))
     return {'ok':not missing_nodes,'stage':'ready' if not missing_nodes else 'nodes',
             'models':len(REQUIRED_MODELS),'missing_nodes':missing_nodes,
-            'service':'h3-runpod-worker','version':'0.5.5'}
+            'service':'h3-runpod-worker','version':'0.6.0'}
 
 def restore_images(items):
     d=COMFY_DIR/'input'; d.mkdir(parents=True,exist_ok=True)
@@ -215,6 +215,36 @@ def handler(job):
         return video_bytes(item)
 
     h3=inp.get('h3') or {}
+
+    # MAX SPEED profile: keep full requested resolution, reduce Turbo from 8 -> 6 steps,
+    # and insert H3 TeaCache immediately before the guider. This targets inference time,
+    # not resolution. Disable with h3.max_speed=false for reference-quality A/B tests.
+    max_speed = h3.get('max_speed', True) is not False
+    if max_speed:
+        target_steps = 6
+        # Match every scheduler node instead of relying on hard-coded IDs.
+        for nid,node in wf.items():
+            if node.get('class_type') == 'BasicScheduler':
+                node.setdefault('inputs', {})['steps'] = target_steps
+        # Insert TeaCache between the final model producer and each BasicGuider.
+        for nid,node in list(wf.items()):
+            if node.get('class_type') == 'BasicGuider':
+                model_in = node.get('inputs', {}).get('model')
+                if isinstance(model_in, list) and len(model_in) >= 2:
+                    cache_id = 'tc_' + str(nid)
+                    wf[cache_id] = {
+                        'class_type': 'MiniMaxH3TeaCache',
+                        'inputs': {
+                            'model': model_in,
+                            'rel_l1_thresh': 0.12,
+                            'start_step': 1,
+                            'end_step': -1,
+                            'total_steps': target_steps
+                        }
+                    }
+                    node['inputs']['model'] = [cache_id, 0]
+        print(f"H3 MAX SPEED enabled: {target_steps} steps + TeaCache threshold 0.12", flush=True)
+
     duration=int(h3.get('duration') or 5)
     # RTX 5090 32 GB cannot safely hold a native 10-20s 768p H3 latent in one pass.
     # Long clips are therefore generated as <=5s continuation segments and joined.
