@@ -25,17 +25,20 @@ MODEL_SOURCES={
     'loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors': ('lightx2v/Minimax-h3-Turbo','minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors'),
 }
 MODEL_ROOT=pathlib.Path(os.getenv('H3_MODEL_ROOT','/workspace/h3-runtime-models'))
-RUNPOD_HF_CACHE=pathlib.Path('/runpod-volume/huggingface-cache/hub')
-BASE_REPO='Comfy-Org/MiniMax-H3'
+RUNPOD_HF_CACHE=pathlib.Path(os.getenv('HF_HOME','/runpod-volume/huggingface-cache'))/'hub'
+BASE_REPO=os.getenv('MODEL_NAME','Comfy-Org/MiniMax-H3')
+BASE_REVISION=os.getenv('MODEL_REVISION','')
 
 def _cached_snapshot(repo_id):
-    exact=RUNPOD_HF_CACHE/('models--'+repo_id.replace('/','--'))/'snapshots'
-    candidates=[exact, RUNPOD_HF_CACHE/('models--'+repo_id.replace('/','--')).lower()/'snapshots']
-    for root in candidates:
-        if root.is_dir():
-            snaps=sorted((p for p in root.iterdir() if p.is_dir()), key=lambda p:p.stat().st_mtime, reverse=True)
-            if snaps:
-                return snaps[0]
+    root=RUNPOD_HF_CACHE/('models--'+repo_id.replace('/','--'))/'snapshots'
+    if BASE_REVISION:
+        exact=root/BASE_REVISION
+        if exact.is_dir():
+            return exact
+    if root.is_dir():
+        snaps=sorted((p for p in root.iterdir() if p.is_dir()), key=lambda p:p.stat().st_mtime, reverse=True)
+        if snaps:
+            return snaps[0]
     return None
 
 def model_cache_diagnostics():
@@ -137,7 +140,7 @@ def preflight():
     missing_nodes=sorted(REQUIRED_NODES-set(info.keys()))
     return {'ok':not missing_nodes,'stage':'ready' if not missing_nodes else 'nodes',
             'models':len(REQUIRED_MODELS),'missing_nodes':missing_nodes,
-            'service':'h3-runpod-worker','version':'0.5.1'}
+            'service':'h3-runpod-worker','version':'0.5.2'}
 
 def restore_images(items):
     d=COMFY_DIR/'input'; d.mkdir(parents=True,exist_ok=True)
@@ -163,12 +166,12 @@ def video_bytes(item):
 def handler(job):
     inp=(job or {}).get('input') or {}
     if inp.get('healthcheck') is True:
-        return {'ok':True,'service':'h3-runpod-worker','version':'0.5.1','models_required':len(REQUIRED_MODELS),'model_root':str(MODEL_ROOT),'base_model_store':BASE_REPO}
+        return {'ok':True,'service':'h3-runpod-worker','version':'0.5.2','models_required':len(REQUIRED_MODELS),'model_root':str(MODEL_ROOT),'base_model_store':BASE_REPO}
     if inp.get('diagnose_model_cache') is True:
         return {
             'ok': True,
             'service': 'h3-runpod-worker',
-            'version': '0.5.1',
+            'version': '0.5.2',
             'env_hints': {k:v for k,v in os.environ.items() if any(x in k.upper() for x in ('MODEL','HF_','HUGGING','RUNPOD')) and 'TOKEN' not in k.upper() and 'KEY' not in k.upper() and 'SECRET' not in k.upper()},
             'paths': model_cache_diagnostics()
         }
