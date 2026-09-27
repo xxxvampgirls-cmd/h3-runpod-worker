@@ -140,7 +140,7 @@ def preflight():
     missing_nodes=sorted(REQUIRED_NODES-set(info.keys()))
     return {'ok':not missing_nodes,'stage':'ready' if not missing_nodes else 'nodes',
             'models':len(REQUIRED_MODELS),'missing_nodes':missing_nodes,
-            'service':'h3-runpod-worker','version':'0.5.3'}
+            'service':'h3-runpod-worker','version':'0.5.4'}
 
 def restore_images(items):
     d=COMFY_DIR/'input'; d.mkdir(parents=True,exist_ok=True)
@@ -166,12 +166,12 @@ def video_bytes(item):
 def handler(job):
     inp=(job or {}).get('input') or {}
     if inp.get('healthcheck') is True:
-        return {'ok':True,'service':'h3-runpod-worker','version':'0.5.2','models_required':len(REQUIRED_MODELS),'model_root':str(MODEL_ROOT),'base_model_store':BASE_REPO}
+        return {'ok':True,'service':'h3-runpod-worker','version':'0.5.4','models_required':len(REQUIRED_MODELS),'model_root':str(MODEL_ROOT),'base_model_store':BASE_REPO}
     if inp.get('diagnose_model_cache') is True:
         return {
             'ok': True,
             'service': 'h3-runpod-worker',
-            'version': '0.5.3',
+            'version': '0.5.4',
             'env_hints': {k:v for k,v in os.environ.items() if any(x in k.upper() for x in ('MODEL','HF_','HUGGING','RUNPOD')) and 'TOKEN' not in k.upper() and 'KEY' not in k.upper() and 'SECRET' not in k.upper()},
             'paths': model_cache_diagnostics()
         }
@@ -207,7 +207,10 @@ def handler(job):
     duration=int(h3.get('duration') or 5)
     # RTX 5090 32 GB cannot safely hold a native 10-20s 768p H3 latent in one pass.
     # Long clips are therefore generated as <=5s continuation segments and joined.
-    if duration > 5:
+    resolution=str(h3.get('resolution') or '').lower()
+    # 480p long mode: try one native continuous H3 pass (better dialogue/lip continuity).
+    # Higher resolutions stay on the safe segmented path for 32 GB GPUs.
+    if duration > 5 and resolution != '480p':
         import copy, math, tempfile
         seg_count=max(2, math.ceil(duration/5))
         work=pathlib.Path(tempfile.mkdtemp(prefix='h3_segments_'))
