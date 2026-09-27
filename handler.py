@@ -7,6 +7,21 @@ HOST='127.0.0.1'; PORT=int(os.getenv('H3_COMFY_PORT','8188'))
 BASE=f'http://{HOST}:{PORT}'
 _proc=None; _lock=threading.Lock()
 
+REQUIRED_MODELS=[
+    'diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors',
+    'text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors',
+    'vae/minimax_h3_audio_vae_fp32.safetensors',
+    'vae/minimax_h3_video_vae_fp16.safetensors',
+    'loras/minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors',
+    'loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors',
+]
+REQUIRED_NODES={
+    'UNETLoader','CLIPLoader','VAELoader','LoraLoaderModelOnly',
+    'MiniMaxH3SigmaShift','MiniMaxH3ImageToVideo','RandomNoise',
+    'BasicGuider','KSamplerSelect','BasicScheduler','SamplerCustomAdvanced',
+    'VAEDecode','VAEDecodeAudio','CreateVideo','SaveVideo'
+}
+
 def _http(path, data=None, timeout=30):
     body=None if data is None else json.dumps(data).encode()
     req=request.Request(BASE+path,data=body,headers={'Content-Type':'application/json'} if body else {},method='POST' if body else 'GET')
@@ -28,6 +43,17 @@ def ensure_comfy():
             try: _http('/system_stats',timeout=2); return
             except Exception: time.sleep(1)
         raise TimeoutError('ComfyUI readiness timeout')
+
+def preflight():
+    missing_models=[p for p in REQUIRED_MODELS if not (COMFY_DIR/'models'/p).is_file()]
+    if missing_models:
+        return {'ok':False,'stage':'models','missing_models':missing_models}
+    ensure_comfy()
+    info=_http('/object_info',timeout=30)
+    missing_nodes=sorted(REQUIRED_NODES-set(info.keys()))
+    return {'ok':not missing_nodes,'stage':'ready' if not missing_nodes else 'nodes',
+            'models':len(REQUIRED_MODELS),'missing_nodes':missing_nodes,
+            'service':'h3-runpod-worker','version':'0.3.0'}
 
 def restore_images(items):
     d=COMFY_DIR/'input'; d.mkdir(parents=True,exist_ok=True)
@@ -52,11 +78,10 @@ def video_bytes(item):
 
 def handler(job):
     inp=(job or {}).get('input') or {}
-
-    # Lightweight readiness test: proves the Runpod worker/handler is alive
-    # without starting ComfyUI or allocating model VRAM.
     if inp.get('healthcheck') is True:
-        return {'ok': True, 'service': 'h3-runpod-worker', 'version': '0.2.0'}
+        return {'ok':True,'service':'h3-runpod-worker','version':'0.3.0','models_baked':len(REQUIRED_MODELS)}
+    if inp.get('preflight') is True:
+        return preflight()
 
     wf=inp.get('workflow')
     if not isinstance(wf,dict) or not wf:
