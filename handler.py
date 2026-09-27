@@ -15,6 +15,7 @@ REQUIRED_MODELS=[
     'vae/minimax_h3_video_vae_fp16.safetensors',
     'loras/minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors',
     'loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors',
+    'loras/minimax_h3_turbo_v4_step600_ema.safetensors',
 ]
 MODEL_SOURCES={
     'diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors': ('Comfy-Org/MiniMax-H3','diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors'),
@@ -23,6 +24,7 @@ MODEL_SOURCES={
     'vae/minimax_h3_video_vae_fp16.safetensors': ('Comfy-Org/MiniMax-H3','vae/minimax_h3_video_vae_fp16.safetensors'),
     'loras/minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors': ('lightx2v/Minimax-h3-Turbo','minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors'),
     'loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors': ('lightx2v/Minimax-h3-Turbo','minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors'),
+    'loras/minimax_h3_turbo_v4_step600_ema.safetensors': ('larryvrh/MiniMax-H3-Turbo-Lora','minimax_h3_turbo_v4_step600_ema.safetensors'),
 }
 MODEL_ROOT=pathlib.Path(os.getenv('H3_MODEL_ROOT','/workspace/h3-runtime-models'))
 RUNPOD_HF_CACHE=pathlib.Path(os.getenv('HF_HOME','/runpod-volume/huggingface-cache'))/'hub'
@@ -105,6 +107,7 @@ REQUIRED_NODES={
     'UNETLoader','CLIPLoader','VAELoader','LoraLoaderModelOnly',
     'MiniMaxH3SigmaShift','MiniMaxH3ImageToVideo','RandomNoise',
     'BasicGuider','KSamplerSelect','BasicScheduler','SamplerCustomAdvanced',
+    'MiniMaxH3TurboLoRA','MiniMaxH3TurboSampler',
     'VAEDecode','VAEDecodeAudio','CreateVideo','SaveVideo'
 }
 
@@ -140,7 +143,7 @@ def preflight():
     missing_nodes=sorted(REQUIRED_NODES-set(info.keys()))
     return {'ok':not missing_nodes,'stage':'ready' if not missing_nodes else 'nodes',
             'models':len(REQUIRED_MODELS),'missing_nodes':missing_nodes,
-            'service':'h3-runpod-worker','version':'0.6.0'}
+            'service':'h3-runpod-worker','version':'0.6.4'}
 
 def restore_images(items):
     d=COMFY_DIR/'input'; d.mkdir(parents=True,exist_ok=True)
@@ -177,7 +180,7 @@ def handler(job):
                 gpu={'cuda_available':False}
         except Exception as e:
             gpu={'diagnostic_error':str(e)}
-        return {'ok':True,'service':'h3-runpod-worker','version':'0.5.5','models_required':len(REQUIRED_MODELS),'model_root':str(MODEL_ROOT),'base_model_store':BASE_REPO,'gpu':gpu}
+        return {'ok':True,'service':'h3-runpod-worker','version':'0.6.4','models_required':len(REQUIRED_MODELS),'model_root':str(MODEL_ROOT),'base_model_store':BASE_REPO,'gpu':gpu}
     if inp.get('diagnose_model_cache') is True:
         return {
             'ok': True,
@@ -246,41 +249,63 @@ def handler(job):
 
     h3=inp.get('h3') or {}
 
-    # MAX SPEED profile: keep full requested resolution, reduce Turbo from 8 -> 6 steps,
-    # and insert H3 TeaCache immediately before the guider. This targets inference time,
-    # not resolution. Disable with h3.max_speed=false for reference-quality A/B tests.
+    # MAX SPEED profile: use the dedicated H3 Turbo nodes rather than a stock
+    # sampler with fewer steps. The Turbo sampler handles H3's video/audio clocks
+    # correctly and is the intended fast path for the Turbo LoRA.
     max_speed = h3.get('max_speed', True) is not False
+    actual_profile = 'quality-reference'
     if max_speed:
-        target_steps = 6
-        # Match the Turbo LoRA to the sampler step count. Using an 8-step LoRA
-        # with a 4-step scheduler is both slower/wasteful and can hurt motion quality.
-        turbo4 = 'minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors'
+        target_steps = 4
+        turbo_lora = 'minimax_h3_turbo_v4_step600_ema.safetensors'
+
+        # Replace the generic LoRA loader with the H3 Turbo LoRA node.
+        # On <=40 GB GPUs use merge mode to reduce peak VRAM and remove the
+        # per-layer LoRA bypass overhead during sampling.
+        try:
+            import torch
+            _profile_vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3) if torch.cuda.is_available() else 0
+        except Exception:
+            _profile_vram_gb = 0
+        low_vram_mode = bool(_profile_vram_gb and _profile_vram_gb <= 40)
+
+        replaced_lora = 0
+        replaced_sampler = 0
         for nid,node in wf.items():
-            if node.get('class_type') == 'LoraLoaderModelOnly':
-                inputs = node.setdefault('inputs', {})
-                for key in ('lora_name','lora'):
-                    if key in inputs and isinstance(inputs[key], str) and 'minimax_h3' in inputs[key].lower():
-                        inputs[key] = turbo4
-            if node.get('class_type') == 'BasicScheduler':
-                node.setdefault('inputs', {})['steps'] = target_steps
-        # Insert TeaCache between the final model producer and each BasicGuider.
-        for nid,node in list(wf.items()):
-            if node.get('class_type') == 'BasicGuider':
-                model_in = node.get('inputs', {}).get('model')
-                if isinstance(model_in, list) and len(model_in) >= 2:
-                    cache_id = 'tc_' + str(nid)
-                    wf[cache_id] = {
-                        'class_type': 'MiniMaxH3TeaCache',
-                        'inputs': {
-                            'model': model_in,
-                            'rel_l1_thresh': 0.12,
-                            'start_step': 1,
-                            'end_step': -1,
-                            'total_steps': target_steps
-                        }
+            ctype = node.get('class_type')
+            inputs = node.setdefault('inputs', {})
+            if ctype == 'LoraLoaderModelOnly':
+                model_in = inputs.get('model')
+                if model_in is not None:
+                    node['class_type'] = 'MiniMaxH3TurboLoRA'
+                    node['inputs'] = {
+                        'model': model_in,
+                        'lora_name': turbo_lora,
+                        'strength': 1.0,
+                        'low_vram': low_vram_mode,
                     }
-                    node['inputs']['model'] = [cache_id, 0]
-        print(f"H3 MAX SPEED enabled: {target_steps} steps + TeaCache threshold 0.12", flush=True)
+                    replaced_lora += 1
+            elif ctype == 'KSamplerSelect':
+                # Same SAMPLER output socket, but with the H3-specific dual
+                # video/audio schedule instead of stock Euler selection.
+                node['class_type'] = 'MiniMaxH3TurboSampler'
+                node['inputs'] = {}
+                replaced_sampler += 1
+            elif ctype == 'BasicScheduler':
+                inputs['scheduler'] = 'simple'
+                inputs['steps'] = target_steps
+                if 'denoise' in inputs:
+                    inputs['denoise'] = 1.0
+
+        # TeaCache is intentionally not inserted at four steps. With only four
+        # denoising passes there is little reuse to exploit and the cache bookkeeping
+        # can erase part of the gain. Keep the graph as lean as possible.
+        actual_profile = 'h3-turbo-4step-v4'
+        print(
+            f"H3 TURBO FAST: steps={target_steps} lora={turbo_lora} "
+            f"lora_nodes={replaced_lora} sampler_nodes={replaced_sampler} "
+            f"low_vram={low_vram_mode}",
+            flush=True,
+        )
 
     duration=int(h3.get('duration') or 5)
     # RTX 5090 32 GB cannot safely hold a native 10-20s 768p H3 latent in one pass.
