@@ -140,7 +140,7 @@ def preflight():
     missing_nodes=sorted(REQUIRED_NODES-set(info.keys()))
     return {'ok':not missing_nodes,'stage':'ready' if not missing_nodes else 'nodes',
             'models':len(REQUIRED_MODELS),'missing_nodes':missing_nodes,
-            'service':'h3-runpod-worker','version':'0.5.4'}
+            'service':'h3-runpod-worker','version':'0.5.5'}
 
 def restore_images(items):
     d=COMFY_DIR/'input'; d.mkdir(parents=True,exist_ok=True)
@@ -166,7 +166,18 @@ def video_bytes(item):
 def handler(job):
     inp=(job or {}).get('input') or {}
     if inp.get('healthcheck') is True:
-        return {'ok':True,'service':'h3-runpod-worker','version':'0.5.4','models_required':len(REQUIRED_MODELS),'model_root':str(MODEL_ROOT),'base_model_store':BASE_REPO}
+        gpu={}
+        try:
+            import torch
+            if torch.cuda.is_available():
+                p=torch.cuda.get_device_properties(0)
+                free,total=torch.cuda.mem_get_info(0)
+                gpu={'name':p.name,'total_vram_gb':round(total/(1024**3),2),'free_vram_gb':round(free/(1024**3),2),'torch':torch.__version__,'torch_cuda':torch.version.cuda}
+            else:
+                gpu={'cuda_available':False}
+        except Exception as e:
+            gpu={'diagnostic_error':str(e)}
+        return {'ok':True,'service':'h3-runpod-worker','version':'0.5.5','models_required':len(REQUIRED_MODELS),'model_root':str(MODEL_ROOT),'base_model_store':BASE_REPO,'gpu':gpu}
     if inp.get('diagnose_model_cache') is True:
         return {
             'ok': True,
