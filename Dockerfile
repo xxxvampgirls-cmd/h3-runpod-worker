@@ -17,7 +17,10 @@ RUN git clone --depth 1 https://github.com/Comfy-Org/ComfyUI.git
 
 WORKDIR /workspace/ComfyUI
 RUN python3 -m pip install --break-system-packages --no-cache-dir \
-    -r requirements.txt runpod "huggingface_hub[cli]"
+    -r requirements.txt runpod "huggingface_hub[cli]" \
+    && python3 -m pip install --break-system-packages --no-cache-dir --force-reinstall \
+       --index-url https://download.pytorch.org/whl/cu128 \
+       torch torchvision torchaudio
 
 # H3 base weights are supplied by RunPod's Serverless Hugging Face Model Cache.
 # Only the small Turbo LoRAs are fetched by the worker when needed; no paid Network Volume is required.
