@@ -193,6 +193,36 @@ def handler(job):
     if not isinstance(wf,dict) or not wf:
         return {'error':'input.workflow is empty'}
 
+    # AUTO SCENE hook. The desktop app (or any vision-capable front end) may send
+    # a structured scene plan derived from the start image. Keep it separate from
+    # the user's short idea so motion, dialogue and ambience can be controlled
+    # independently without hard-coding one specific prompt-node id.
+    auto_scene = inp.get('auto_scene') or {}
+    if auto_scene.get('enabled'):
+        visual_prompt = str(auto_scene.get('visual_prompt') or '').strip()
+        dialogue = str(auto_scene.get('dialogue') or '').strip()
+        ambience = str(auto_scene.get('ambience') or '').strip()
+        combined = visual_prompt
+        if dialogue:
+            combined += "\nSpoken dialogue: " + dialogue
+        if ambience:
+            combined += "\nNatural synchronized audio/ambience: " + ambience
+        if combined:
+            # Replace only explicitly tagged prompt nodes. This avoids accidentally
+            # overwriting negative prompts or unrelated CLIP text nodes.
+            tagged = 0
+            for nid,node in wf.items():
+                meta = node.get('_meta') or {}
+                title = str(meta.get('title') or '').lower()
+                if ('h3 prompt' in title or 'auto scene prompt' in title):
+                    inputs = node.setdefault('inputs', {})
+                    for key in ('text','prompt'):
+                        if key in inputs:
+                            inputs[key] = combined
+                            tagged += 1
+                            break
+            print(f"AUTO SCENE enabled: tagged_prompt_nodes={tagged} dialogue={bool(dialogue)} ambience={bool(ambience)}", flush=True)
+
     ensure_models(); ensure_comfy(); restore_images(inp.get('images'))
 
     def run_workflow(one_wf):
