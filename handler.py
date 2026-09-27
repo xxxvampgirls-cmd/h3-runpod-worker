@@ -236,22 +236,28 @@ def handler(job):
     print(f"H3 mode: duration={duration}s resolution={resolution} vram={gpu_vram_gb:.1f}GB mode={mode}", flush=True)
     if duration > 5 and not native_long:
         import copy, math, tempfile
-        seg_count=max(2, math.ceil(duration/5))
+        # Fastest safe segmentation: prefer 2 chunks on high-VRAM workers.
+        # 15s -> ~7.5s + ~7.5s on >=80GB; 32GB keeps proven <=5s chunks.
+        seg_count = 2 if gpu_vram_gb >= 80 and duration <= 15 else max(2, math.ceil(duration/5))
         work=pathlib.Path(tempfile.mkdtemp(prefix='h3_segments_'))
         parts=[]
         prev_frame=None
         try:
             for idx in range(seg_count):
                 one=copy.deepcopy(wf)
-                # 5 seconds at 24fps snapped to H3's 17k+5 grid = 124 frames.
-                if '8' in one and one['8'].get('class_type')=='MiniMaxH3ImageToVideo':
-                    one['8']['inputs']['length']=124
+                # Set per-segment frame count dynamically and snap to H3's 17k+5 grid.
+                seg_seconds = duration / seg_count
+                seg_frames = max(22, round(seg_seconds * 24))
+                seg_frames += (5 - (seg_frames % 17)) % 17
+                h3_node = next((nid for nid,n in one.items() if n.get('class_type')=='MiniMaxH3ImageToVideo'), None)
+                if h3_node:
+                    one[h3_node]['inputs']['length']=seg_frames
                     if prev_frame:
                         node_id='900'
                         one[node_id]={'class_type':'LoadImage','inputs':{'image':prev_frame.name}}
-                        one['8']['inputs']['first_frame']=[node_id,0]
+                        one[h3_node]['inputs']['first_frame']=[node_id,0]
                         # Never force the user's original LAST FRAME onto intermediate chunks.
-                        one['8']['inputs'].pop('last_frame',None)
+                        one[h3_node]['inputs'].pop('last_frame',None)
                 raw=run_workflow(one)
                 part=work/f'part_{idx:02d}.mp4'; part.write_bytes(raw); parts.append(part)
                 if idx < seg_count-1:
@@ -267,7 +273,7 @@ def handler(job):
             raw=final.read_bytes()
             return {'video_base64':base64.b64encode(raw).decode('ascii'),
                     'filename':'H3_Studio_long.mp4','bytes':len(raw),
-                    'segments':seg_count,'segment_seconds':5,'continuation':'last_frame'}
+                    'segments':seg_count,'segment_seconds':round(duration/seg_count,2),'continuation':'last_frame','mode':'fast-segmented'}
         finally:
             import shutil
             shutil.rmtree(work,ignore_errors=True)
