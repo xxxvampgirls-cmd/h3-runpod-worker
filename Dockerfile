@@ -26,6 +26,10 @@ RUN python3 -m pip install --break-system-packages --no-cache-dir \
 RUN python3 -m pip install --break-system-packages --no-cache-dir \
     "triton>=3.6" "nvidia-cutlass-dsl>=4.5" cuda-python apache-tvm-ffi
 
+# H3-specific timestep cache: measured ~3x on 20-step H3 and requires no compiled CUDA extension.
+RUN git clone --depth 1 https://github.com/Icyoung/ComfyUI-MiniMaxH3-TeaCache.git \
+    /workspace/ComfyUI/custom_nodes/ComfyUI-MiniMaxH3-TeaCache
+
 # H3 base weights are supplied by RunPod's Serverless Hugging Face Model Cache.
 # Only the small Turbo LoRAs are fetched by the worker when needed; no paid Network Volume is required.
 COPY handler.py /workspace/handler.py
