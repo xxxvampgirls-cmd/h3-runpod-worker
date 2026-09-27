@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04
+FROM nvidia/cuda:13.0.2-cudnn-runtime-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -20,7 +20,7 @@ RUN python3 -m pip install --break-system-packages --no-cache-dir \
     -r requirements.txt runpod "huggingface_hub[cli]" \
     && python3 -m pip install --break-system-packages --no-cache-dir --force-reinstall \
        --index-url https://download.pytorch.org/whl/cu130 \
-       torch torchvision torchaudio
+       torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0
 
 # Blackwell/RTX 50 optimization prerequisites. cu130 enables optimized CUDA kernels.
 RUN python3 -m pip install --break-system-packages --no-cache-dir \
