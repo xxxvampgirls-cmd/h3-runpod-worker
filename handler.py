@@ -140,7 +140,7 @@ def preflight():
     missing_nodes=sorted(REQUIRED_NODES-set(info.keys()))
     return {'ok':not missing_nodes,'stage':'ready' if not missing_nodes else 'nodes',
             'models':len(REQUIRED_MODELS),'missing_nodes':missing_nodes,
-            'service':'h3-runpod-worker','version':'0.5.2'}
+            'service':'h3-runpod-worker','version':'0.5.3'}
 
 def restore_images(items):
     d=COMFY_DIR/'input'; d.mkdir(parents=True,exist_ok=True)
@@ -171,7 +171,7 @@ def handler(job):
         return {
             'ok': True,
             'service': 'h3-runpod-worker',
-            'version': '0.5.2',
+            'version': '0.5.3',
             'env_hints': {k:v for k,v in os.environ.items() if any(x in k.upper() for x in ('MODEL','HF_','HUGGING','RUNPOD')) and 'TOKEN' not in k.upper() and 'KEY' not in k.upper() and 'SECRET' not in k.upper()},
             'paths': model_cache_diagnostics()
         }
@@ -183,24 +183,69 @@ def handler(job):
         return {'error':'input.workflow is empty'}
 
     ensure_models(); ensure_comfy(); restore_images(inp.get('images'))
-    client='h3-runpod-'+uuid.uuid4().hex
-    ans=_http('/prompt',{'prompt':wf,'client_id':client},timeout=30)
-    pid=ans.get('prompt_id')
-    if not pid: raise RuntimeError('ComfyUI did not return prompt_id: '+str(ans)[:1000])
-    deadline=time.time()+int(os.getenv('H3_JOB_TIMEOUT','1800'))
-    hist=None
-    while time.time()<deadline:
-        h=_http('/history/'+parse.quote(pid),timeout=30)
-        if pid in h: hist=h[pid]; break
-        time.sleep(1)
-    if hist is None: raise TimeoutError('ComfyUI workflow timeout')
-    status=hist.get('status') or {}
-    if status.get('status_str')=='error':
-        raise RuntimeError('ComfyUI workflow failed: '+json.dumps(status)[:3000])
-    item=find_video(hist.get('outputs') or {})
-    if not item:
-        raise RuntimeError('Workflow completed but MP4/WebM/MOV was not found in ComfyUI history')
-    raw=video_bytes(item)
-    return {'video_base64':base64.b64encode(raw).decode('ascii'),'filename':item.get('filename'),'bytes':len(raw)}
+
+    def run_workflow(one_wf):
+        client='h3-runpod-'+uuid.uuid4().hex
+        ans=_http('/prompt',{'prompt':one_wf,'client_id':client},timeout=30)
+        pid=ans.get('prompt_id')
+        if not pid: raise RuntimeError('ComfyUI did not return prompt_id: '+str(ans)[:1000])
+        deadline=time.time()+int(os.getenv('H3_JOB_TIMEOUT','1800'))
+        hist=None
+        while time.time()<deadline:
+            h=_http('/history/'+parse.quote(pid),timeout=30)
+            if pid in h: hist=h[pid]; break
+            time.sleep(1)
+        if hist is None: raise TimeoutError('ComfyUI workflow timeout')
+        status=hist.get('status') or {}
+        if status.get('status_str')=='error':
+            raise RuntimeError('ComfyUI workflow failed: '+json.dumps(status)[:3000])
+        item=find_video(hist.get('outputs') or {})
+        if not item: raise RuntimeError('Workflow completed but video was not found')
+        return video_bytes(item)
+
+    h3=inp.get('h3') or {}
+    duration=int(h3.get('duration') or 5)
+    # RTX 5090 32 GB cannot safely hold a native 10-20s 768p H3 latent in one pass.
+    # Long clips are therefore generated as <=5s continuation segments and joined.
+    if duration > 5:
+        import copy, math, tempfile
+        seg_count=max(2, math.ceil(duration/5))
+        work=pathlib.Path(tempfile.mkdtemp(prefix='h3_segments_'))
+        parts=[]
+        prev_frame=None
+        try:
+            for idx in range(seg_count):
+                one=copy.deepcopy(wf)
+                # 5 seconds at 24fps snapped to H3's 17k+5 grid = 124 frames.
+                if '8' in one and one['8'].get('class_type')=='MiniMaxH3ImageToVideo':
+                    one['8']['inputs']['length']=124
+                    if prev_frame:
+                        node_id='900'
+                        one[node_id]={'class_type':'LoadImage','inputs':{'image':prev_frame.name}}
+                        one['8']['inputs']['first_frame']=[node_id,0]
+                        # Never force the user's original LAST FRAME onto intermediate chunks.
+                        one['8']['inputs'].pop('last_frame',None)
+                raw=run_workflow(one)
+                part=work/f'part_{idx:02d}.mp4'; part.write_bytes(raw); parts.append(part)
+                if idx < seg_count-1:
+                    frame=COMFY_DIR/'input'/f'h3_continue_{uuid.uuid4().hex}.png'
+                    subprocess.run(['ffmpeg','-y','-sseof','-0.08','-i',str(part),'-frames:v','1',str(frame)],
+                                   check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+                    prev_frame=frame
+            concat=work/'concat.txt'
+            concat.write_text(''.join("file '"+str(p).replace("'","'\\''")+"'\n" for p in parts))
+            final=work/'final.mp4'
+            subprocess.run(['ffmpeg','-y','-f','concat','-safe','0','-i',str(concat),'-c','copy',str(final)],
+                           check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+            raw=final.read_bytes()
+            return {'video_base64':base64.b64encode(raw).decode('ascii'),
+                    'filename':'H3_Studio_long.mp4','bytes':len(raw),
+                    'segments':seg_count,'segment_seconds':5,'continuation':'last_frame'}
+        finally:
+            import shutil
+            shutil.rmtree(work,ignore_errors=True)
+
+    raw=run_workflow(wf)
+    return {'video_base64':base64.b64encode(raw).decode('ascii'),'filename':'H3_Studio.mp4','bytes':len(raw)}
 
 runpod.serverless.start({"handler": handler})
