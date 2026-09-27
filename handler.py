@@ -24,20 +24,48 @@ MODEL_SOURCES={
     'loras/minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors': ('lightx2v/Minimax-h3-Turbo','minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors'),
     'loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors': ('lightx2v/Minimax-h3-Turbo','minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors'),
 }
-MODEL_ROOT=pathlib.Path(os.getenv('H3_MODEL_ROOT','/runpod-volume/h3-models'))
+MODEL_ROOT=pathlib.Path(os.getenv('H3_MODEL_ROOT','/workspace/h3-runtime-models'))
+RUNPOD_HF_CACHE=pathlib.Path('/runpod-volume/huggingface-cache/hub')
+BASE_REPO='Comfy-Org/MiniMax-H3'
+
+def _cached_snapshot(repo_id):
+    exact=RUNPOD_HF_CACHE/('models--'+repo_id.replace('/','--'))/'snapshots'
+    candidates=[exact, RUNPOD_HF_CACHE/('models--'+repo_id.replace('/','--')).lower()/'snapshots']
+    for root in candidates:
+        if root.is_dir():
+            snaps=sorted((p for p in root.iterdir() if p.is_dir()), key=lambda p:p.stat().st_mtime, reverse=True)
+            if snaps:
+                return snaps[0]
+    return None
 
 def ensure_models():
+    """Use RunPod Model Store for the large H3 base repo; fetch only the two Turbo LoRAs."""
     MODEL_ROOT.mkdir(parents=True, exist_ok=True)
+    cached=_cached_snapshot(BASE_REPO)
+    if cached is None:
+        raise RuntimeError(
+            "RunPod cached model not found. Set endpoint Model to Comfy-Org/MiniMax-H3 "
+            "so RunPod downloads/caches it before starting the worker."
+        )
+
     for rel,(repo_id,filename) in MODEL_SOURCES.items():
-        target=MODEL_ROOT/rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if not target.is_file():
-            downloaded=pathlib.Path(hf_hub_download(repo_id=repo_id, filename=filename, local_dir=str(MODEL_ROOT)))
-            if downloaded != target and not target.exists():
-                target.parent.mkdir(parents=True, exist_ok=True)
-                downloaded.replace(target)
         comfy_target=COMFY_DIR/'models'/rel
         comfy_target.parent.mkdir(parents=True, exist_ok=True)
+
+        if repo_id == BASE_REPO:
+            target=cached/filename
+            if not target.is_file():
+                raise RuntimeError(f"Cached H3 file missing: {filename}")
+        else:
+            target=MODEL_ROOT/rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not target.is_file():
+                downloaded=pathlib.Path(hf_hub_download(
+                    repo_id=repo_id, filename=filename, local_dir=str(MODEL_ROOT)
+                ))
+                if downloaded != target and not target.exists():
+                    downloaded.replace(target)
+
         if comfy_target.exists() or comfy_target.is_symlink():
             if comfy_target.is_symlink() and comfy_target.resolve()==target.resolve():
                 continue
@@ -84,7 +112,7 @@ def preflight():
     missing_nodes=sorted(REQUIRED_NODES-set(info.keys()))
     return {'ok':not missing_nodes,'stage':'ready' if not missing_nodes else 'nodes',
             'models':len(REQUIRED_MODELS),'missing_nodes':missing_nodes,
-            'service':'h3-runpod-worker','version':'0.4.0'}
+            'service':'h3-runpod-worker','version':'0.5.0'}
 
 def restore_images(items):
     d=COMFY_DIR/'input'; d.mkdir(parents=True,exist_ok=True)
@@ -110,7 +138,7 @@ def video_bytes(item):
 def handler(job):
     inp=(job or {}).get('input') or {}
     if inp.get('healthcheck') is True:
-        return {'ok':True,'service':'h3-runpod-worker','version':'0.3.0','models_required':len(REQUIRED_MODELS),'model_root':str(MODEL_ROOT)}
+        return {'ok':True,'service':'h3-runpod-worker','version':'0.5.0','models_required':len(REQUIRED_MODELS),'model_root':str(MODEL_ROOT),'base_model_store':BASE_REPO}
     if inp.get('preflight') is True:
         return preflight()
 
