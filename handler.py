@@ -1,6 +1,7 @@
 import base64, json, os, pathlib, subprocess, sys, threading, time, uuid
 from urllib import request, parse
 import runpod
+from huggingface_hub import hf_hub_download
 
 COMFY_DIR=pathlib.Path(os.getenv('COMFY_DIR','/workspace/ComfyUI'))
 HOST='127.0.0.1'; PORT=int(os.getenv('H3_COMFY_PORT','8188'))
@@ -15,6 +16,35 @@ REQUIRED_MODELS=[
     'loras/minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors',
     'loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors',
 ]
+MODEL_SOURCES={
+    'diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors': ('Comfy-Org/MiniMax-H3','diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors'),
+    'text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors': ('Comfy-Org/MiniMax-H3','text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors'),
+    'vae/minimax_h3_audio_vae_fp32.safetensors': ('Comfy-Org/MiniMax-H3','vae/minimax_h3_audio_vae_fp32.safetensors'),
+    'vae/minimax_h3_video_vae_fp16.safetensors': ('Comfy-Org/MiniMax-H3','vae/minimax_h3_video_vae_fp16.safetensors'),
+    'loras/minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors': ('lightx2v/Minimax-h3-Turbo','minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors'),
+    'loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors': ('lightx2v/Minimax-h3-Turbo','minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors'),
+}
+MODEL_ROOT=pathlib.Path(os.getenv('H3_MODEL_ROOT','/runpod-volume/h3-models'))
+
+def ensure_models():
+    MODEL_ROOT.mkdir(parents=True, exist_ok=True)
+    for rel,(repo_id,filename) in MODEL_SOURCES.items():
+        target=MODEL_ROOT/rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.is_file():
+            downloaded=pathlib.Path(hf_hub_download(repo_id=repo_id, filename=filename, local_dir=str(MODEL_ROOT)))
+            if downloaded != target and not target.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                downloaded.replace(target)
+        comfy_target=COMFY_DIR/'models'/rel
+        comfy_target.parent.mkdir(parents=True, exist_ok=True)
+        if comfy_target.exists() or comfy_target.is_symlink():
+            if comfy_target.is_symlink() and comfy_target.resolve()==target.resolve():
+                continue
+            if comfy_target.is_file() or comfy_target.is_symlink():
+                comfy_target.unlink()
+        comfy_target.symlink_to(target)
+
 REQUIRED_NODES={
     'UNETLoader','CLIPLoader','VAELoader','LoraLoaderModelOnly',
     'MiniMaxH3SigmaShift','MiniMaxH3ImageToVideo','RandomNoise',
@@ -45,6 +75,7 @@ def ensure_comfy():
         raise TimeoutError('ComfyUI readiness timeout')
 
 def preflight():
+    ensure_models()
     missing_models=[p for p in REQUIRED_MODELS if not (COMFY_DIR/'models'/p).is_file()]
     if missing_models:
         return {'ok':False,'stage':'models','missing_models':missing_models}
@@ -53,7 +84,7 @@ def preflight():
     missing_nodes=sorted(REQUIRED_NODES-set(info.keys()))
     return {'ok':not missing_nodes,'stage':'ready' if not missing_nodes else 'nodes',
             'models':len(REQUIRED_MODELS),'missing_nodes':missing_nodes,
-            'service':'h3-runpod-worker','version':'0.3.0'}
+            'service':'h3-runpod-worker','version':'0.4.0'}
 
 def restore_images(items):
     d=COMFY_DIR/'input'; d.mkdir(parents=True,exist_ok=True)
@@ -79,7 +110,7 @@ def video_bytes(item):
 def handler(job):
     inp=(job or {}).get('input') or {}
     if inp.get('healthcheck') is True:
-        return {'ok':True,'service':'h3-runpod-worker','version':'0.3.0','models_baked':len(REQUIRED_MODELS)}
+        return {'ok':True,'service':'h3-runpod-worker','version':'0.3.0','models_required':len(REQUIRED_MODELS),'model_root':str(MODEL_ROOT)}
     if inp.get('preflight') is True:
         return preflight()
 
@@ -87,7 +118,7 @@ def handler(job):
     if not isinstance(wf,dict) or not wf:
         return {'error':'input.workflow is empty'}
 
-    ensure_comfy(); restore_images(inp.get('images'))
+    ensure_models(); ensure_comfy(); restore_images(inp.get('images'))
     client='h3-runpod-'+uuid.uuid4().hex
     ans=_http('/prompt',{'prompt':wf,'client_id':client},timeout=30)
     pid=ans.get('prompt_id')
