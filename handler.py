@@ -143,7 +143,7 @@ def preflight():
     missing_nodes=sorted(REQUIRED_NODES-set(info.keys()))
     return {'ok':not missing_nodes,'stage':'ready' if not missing_nodes else 'nodes',
             'models':len(REQUIRED_MODELS),'missing_nodes':missing_nodes,
-            'service':'h3-runpod-worker','version':'0.6.6'}
+            'service':'h3-runpod-worker','version':'0.6.7'}
 
 def restore_images(items):
     d=COMFY_DIR/'input'; d.mkdir(parents=True,exist_ok=True)
@@ -199,7 +199,7 @@ def handler(job):
                 gpu={'cuda_available':False}
         except Exception as e:
             gpu={'diagnostic_error':str(e)}
-        return {'ok':True,'service':'h3-runpod-worker','version':'0.6.6','models_required':len(REQUIRED_MODELS),'model_root':str(MODEL_ROOT),'base_model_store':BASE_REPO,'gpu':gpu}
+        return {'ok':True,'service':'h3-runpod-worker','version':'0.6.7','models_required':len(REQUIRED_MODELS),'model_root':str(MODEL_ROOT),'base_model_store':BASE_REPO,'gpu':gpu}
     if inp.get('diagnose_model_cache') is True:
         return {
             'ok': True,
@@ -282,6 +282,7 @@ def handler(job):
         return raw
 
     h3=inp.get('h3') or {}
+    return_thumbnail = h3.get('return_thumbnail', True) is not False
 
     # MAX SPEED profile: use the dedicated H3 Turbo nodes rather than a stock
     # sampler with fewer steps. The Turbo sampler handles H3's video/audio clocks
@@ -403,7 +404,7 @@ def handler(job):
             except Exception:
                 gpu_name=''
             return {'video_base64':base64.b64encode(raw).decode('ascii'),
-                    'thumbnail_base64':video_thumbnail_base64(raw),
+                    'thumbnail_base64':video_thumbnail_base64(raw) if return_thumbnail else '',
                     'filename':'H3_Studio_long.mp4','bytes':len(raw),
                     'segments':seg_count,'segment_seconds':round(duration/seg_count,2),
                     'continuation':'last_frame','mode':'fast-segmented',
@@ -421,7 +422,7 @@ def handler(job):
     except Exception:
         gpu_name=''
     return {'video_base64':base64.b64encode(raw).decode('ascii'),
-            'thumbnail_base64':video_thumbnail_base64(raw),
+            'thumbnail_base64':video_thumbnail_base64(raw) if return_thumbnail else '',
             'filename':'H3_Studio.mp4','bytes':len(raw),
             'mode':mode,'profile':actual_profile,'prompt_used':effective_prompt,
             'worker_seconds':round(time.time()-worker_t0,2),'gpu':gpu_name,
