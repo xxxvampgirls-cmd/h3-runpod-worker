@@ -143,7 +143,7 @@ def preflight():
     missing_nodes=sorted(REQUIRED_NODES-set(info.keys()))
     return {'ok':not missing_nodes,'stage':'ready' if not missing_nodes else 'nodes',
             'models':len(REQUIRED_MODELS),'missing_nodes':missing_nodes,
-            'service':'h3-runpod-worker','version':'0.6.5'}
+            'service':'h3-runpod-worker','version':'0.6.6'}
 
 def restore_images(items):
     d=COMFY_DIR/'input'; d.mkdir(parents=True,exist_ok=True)
@@ -199,7 +199,7 @@ def handler(job):
                 gpu={'cuda_available':False}
         except Exception as e:
             gpu={'diagnostic_error':str(e)}
-        return {'ok':True,'service':'h3-runpod-worker','version':'0.6.5','models_required':len(REQUIRED_MODELS),'model_root':str(MODEL_ROOT),'base_model_store':BASE_REPO,'gpu':gpu}
+        return {'ok':True,'service':'h3-runpod-worker','version':'0.6.6','models_required':len(REQUIRED_MODELS),'model_root':str(MODEL_ROOT),'base_model_store':BASE_REPO,'gpu':gpu}
     if inp.get('diagnose_model_cache') is True:
         return {
             'ok': True,
@@ -215,6 +215,8 @@ def handler(job):
     if not isinstance(wf,dict) or not wf:
         return {'error':'input.workflow is empty'}
     worker_t0=time.time()
+    timings={}
+    stage_t0=time.time()
     effective_prompt=''
 
     # AUTO SCENE hook. The desktop app (or any vision-capable front end) may send
@@ -248,9 +250,17 @@ def handler(job):
                             break
             print(f"AUTO SCENE enabled: tagged_prompt_nodes={tagged} dialogue={bool(dialogue)} ambience={bool(ambience)}", flush=True)
 
-    ensure_models(); ensure_comfy(); restore_images(inp.get('images'))
+    ensure_models()
+    timings['ensure_models']=round(time.time()-stage_t0,3)
+    stage_t0=time.time()
+    ensure_comfy()
+    timings['ensure_comfy']=round(time.time()-stage_t0,3)
+    stage_t0=time.time()
+    restore_images(inp.get('images'))
+    timings['restore_images']=round(time.time()-stage_t0,3)
 
     def run_workflow(one_wf):
+        wf_t0=time.time()
         client='h3-runpod-'+uuid.uuid4().hex
         ans=_http('/prompt',{'prompt':one_wf,'client_id':client},timeout=30)
         pid=ans.get('prompt_id')
@@ -267,7 +277,9 @@ def handler(job):
             raise RuntimeError('ComfyUI workflow failed: '+json.dumps(status)[:3000])
         item=find_video(hist.get('outputs') or {})
         if not item: raise RuntimeError('Workflow completed but video was not found')
-        return video_bytes(item)
+        raw=video_bytes(item)
+        timings.setdefault('workflow_runs',[]).append(round(time.time()-wf_t0,3))
+        return raw
 
     h3=inp.get('h3') or {}
 
@@ -396,7 +408,8 @@ def handler(job):
                     'segments':seg_count,'segment_seconds':round(duration/seg_count,2),
                     'continuation':'last_frame','mode':'fast-segmented',
                     'profile':actual_profile,'prompt_used':effective_prompt,
-                    'worker_seconds':round(time.time()-worker_t0,2),'gpu':gpu_name}
+                    'worker_seconds':round(time.time()-worker_t0,2),'gpu':gpu_name,
+                    'timings':timings,'speed_profile':actual_profile,'turbo_steps':target_steps if max_speed else None}
         finally:
             import shutil
             shutil.rmtree(work,ignore_errors=True)
@@ -411,6 +424,7 @@ def handler(job):
             'thumbnail_base64':video_thumbnail_base64(raw),
             'filename':'H3_Studio.mp4','bytes':len(raw),
             'mode':mode,'profile':actual_profile,'prompt_used':effective_prompt,
-            'worker_seconds':round(time.time()-worker_t0,2),'gpu':gpu_name}
+            'worker_seconds':round(time.time()-worker_t0,2),'gpu':gpu_name,
+            'timings':timings,'speed_profile':actual_profile,'turbo_steps':target_steps if max_speed else None}
 
 runpod.serverless.start({"handler": handler})
