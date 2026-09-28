@@ -143,7 +143,7 @@ def preflight():
     missing_nodes=sorted(REQUIRED_NODES-set(info.keys()))
     return {'ok':not missing_nodes,'stage':'ready' if not missing_nodes else 'nodes',
             'models':len(REQUIRED_MODELS),'missing_nodes':missing_nodes,
-            'service':'h3-runpod-worker','version':'0.6.4'}
+            'service':'h3-runpod-worker','version':'0.6.5'}
 
 def restore_images(items):
     d=COMFY_DIR/'input'; d.mkdir(parents=True,exist_ok=True)
@@ -166,6 +166,25 @@ def video_bytes(item):
     q=parse.urlencode({'filename':item['filename'],'subfolder':item.get('subfolder',''),'type':item.get('type','output')})
     with request.urlopen(BASE+'/view?'+q,timeout=300) as r: return r.read()
 
+def video_thumbnail_base64(raw):
+    """Extract a compact JPEG preview on the worker; Docker already includes ffmpeg."""
+    import tempfile
+    root=pathlib.Path(tempfile.mkdtemp(prefix='h3_thumb_'))
+    try:
+        src=root/'video.mp4'; dst=root/'preview.jpg'; src.write_bytes(raw)
+        cp=subprocess.run(
+            ['ffmpeg','-y','-ss','0.35','-i',str(src),'-frames:v','1','-vf','scale=360:-2','-q:v','3',str(dst)],
+            stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=45
+        )
+        if cp.returncode==0 and dst.is_file() and dst.stat().st_size>100:
+            return base64.b64encode(dst.read_bytes()).decode('ascii')
+    except Exception as e:
+        print('thumbnail warning:', type(e).__name__, str(e)[:300], flush=True)
+    finally:
+        import shutil
+        shutil.rmtree(root,ignore_errors=True)
+    return ''
+
 def handler(job):
     inp=(job or {}).get('input') or {}
     if inp.get('healthcheck') is True:
@@ -180,7 +199,7 @@ def handler(job):
                 gpu={'cuda_available':False}
         except Exception as e:
             gpu={'diagnostic_error':str(e)}
-        return {'ok':True,'service':'h3-runpod-worker','version':'0.6.4','models_required':len(REQUIRED_MODELS),'model_root':str(MODEL_ROOT),'base_model_store':BASE_REPO,'gpu':gpu}
+        return {'ok':True,'service':'h3-runpod-worker','version':'0.6.5','models_required':len(REQUIRED_MODELS),'model_root':str(MODEL_ROOT),'base_model_store':BASE_REPO,'gpu':gpu}
     if inp.get('diagnose_model_cache') is True:
         return {
             'ok': True,
@@ -195,6 +214,8 @@ def handler(job):
     wf=inp.get('workflow')
     if not isinstance(wf,dict) or not wf:
         return {'error':'input.workflow is empty'}
+    worker_t0=time.time()
+    effective_prompt=''
 
     # AUTO SCENE hook. The desktop app (or any vision-capable front end) may send
     # a structured scene plan derived from the start image. Keep it separate from
@@ -211,6 +232,7 @@ def handler(job):
         if ambience:
             combined += "\nNatural synchronized audio/ambience: " + ambience
         if combined:
+            effective_prompt=combined
             # Replace only explicitly tagged prompt nodes. This avoids accidentally
             # overwriting negative prompts or unrelated CLIP text nodes.
             tagged = 0
@@ -363,14 +385,32 @@ def handler(job):
             subprocess.run(['ffmpeg','-y','-f','concat','-safe','0','-i',str(concat),'-c','copy',str(final)],
                            check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
             raw=final.read_bytes()
+            try:
+                import torch
+                gpu_name=torch.cuda.get_device_name(0) if torch.cuda.is_available() else ''
+            except Exception:
+                gpu_name=''
             return {'video_base64':base64.b64encode(raw).decode('ascii'),
+                    'thumbnail_base64':video_thumbnail_base64(raw),
                     'filename':'H3_Studio_long.mp4','bytes':len(raw),
-                    'segments':seg_count,'segment_seconds':round(duration/seg_count,2),'continuation':'last_frame','mode':'fast-segmented'}
+                    'segments':seg_count,'segment_seconds':round(duration/seg_count,2),
+                    'continuation':'last_frame','mode':'fast-segmented',
+                    'profile':actual_profile,'prompt_used':effective_prompt,
+                    'worker_seconds':round(time.time()-worker_t0,2),'gpu':gpu_name}
         finally:
             import shutil
             shutil.rmtree(work,ignore_errors=True)
 
     raw=run_workflow(wf)
-    return {'video_base64':base64.b64encode(raw).decode('ascii'),'filename':'H3_Studio.mp4','bytes':len(raw)}
+    try:
+        import torch
+        gpu_name=torch.cuda.get_device_name(0) if torch.cuda.is_available() else ''
+    except Exception:
+        gpu_name=''
+    return {'video_base64':base64.b64encode(raw).decode('ascii'),
+            'thumbnail_base64':video_thumbnail_base64(raw),
+            'filename':'H3_Studio.mp4','bytes':len(raw),
+            'mode':mode,'profile':actual_profile,'prompt_used':effective_prompt,
+            'worker_seconds':round(time.time()-worker_t0,2),'gpu':gpu_name}
 
 runpod.serverless.start({"handler": handler})
