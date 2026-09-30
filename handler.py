@@ -327,11 +327,15 @@ def handler(job):
     auto_scene = inp.get('auto_scene') or {}
     if auto_scene.get('enabled'):
         visual_prompt = str(auto_scene.get('visual_prompt') or '').strip()
-        dialogue = str(auto_scene.get('dialogue') or '').strip()
+        allow_dialogue = bool(auto_scene.get('allow_dialogue', False))
+        dialogue = str(auto_scene.get('dialogue') or '').strip() if allow_dialogue else ''
+        no_speech = bool(auto_scene.get('no_speech', not allow_dialogue))
         ambience = str(auto_scene.get('ambience') or '').strip()
         combined = visual_prompt
         if dialogue:
-            combined += "\nSpoken dialogue: " + dialogue
+            combined += "\nSpoken dialogue only: " + dialogue + ". No other speech."
+        elif no_speech:
+            combined += "\nAudio: environmental and synchronized action sounds only. No human speech, no narration, no voiceover, no spoken words."
         if ambience:
             combined += "\nNatural synchronized audio/ambience: " + ambience
         if combined:
