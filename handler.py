@@ -7,6 +7,8 @@ COMFY_DIR=pathlib.Path(os.getenv('COMFY_DIR','/workspace/ComfyUI'))
 HOST='127.0.0.1'; PORT=int(os.getenv('H3_COMFY_PORT','8188'))
 BASE=f'http://{HOST}:{PORT}'
 _proc=None; _lock=threading.Lock()
+ATTENTION_BACKEND=os.getenv('H3_ATTENTION_BACKEND','ck').strip().lower()
+ACTIVE_ATTENTION_BACKEND='unknown'
 
 REQUIRED_MODELS=[
     'diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors',
@@ -118,20 +120,60 @@ def _http(path, data=None, timeout=30):
         raw=r.read(); return json.loads(raw.decode()) if raw else {}
 
 def ensure_comfy():
-    global _proc
+    global _proc, ACTIVE_ATTENTION_BACKEND
     with _lock:
         try:
-            _http('/system_stats',timeout=2); return
-        except Exception: pass
-        if _proc is None or _proc.poll() is not None:
-            cmd=[sys.executable,'main.py','--listen',HOST,'--port',str(PORT),'--disable-auto-launch']
+            _http('/system_stats',timeout=2)
+            if ACTIVE_ATTENTION_BACKEND == 'unknown':
+                ACTIVE_ATTENTION_BACKEND = ATTENTION_BACKEND or 'standard'
+            return
+        except Exception:
+            pass
+
+        def _start(backend):
+            global _proc, ACTIVE_ATTENTION_BACKEND
+            cmd=[sys.executable,'main.py','--listen',HOST,'--port',str(PORT),'--disable-auto-launch','--disable-comfy-compiler']
+            if backend == 'ck':
+                cmd.append('--use-ck-attention')
+            elif backend == 'sage':
+                cmd.append('--use-sage-attention')
+            ACTIVE_ATTENTION_BACKEND=backend
+            print('Starting ComfyUI attention_backend='+backend+' compiler=OFF',flush=True)
             _proc=subprocess.Popen(cmd,cwd=str(COMFY_DIR),stdout=sys.stdout,stderr=sys.stderr)
-        deadline=time.time()+180
-        while time.time()<deadline:
-            if _proc.poll() is not None: raise RuntimeError(f'ComfyUI exited rc={_proc.returncode}')
-            try: _http('/system_stats',timeout=2); return
-            except Exception: time.sleep(1)
-        raise TimeoutError('ComfyUI readiness timeout')
+
+        # QUALITY SAFE FAST: keep the same H3 graph/steps/resolution and only
+        # change the attention implementation. CK ships with current ComfyUI.
+        # If CK cannot initialize on a future Comfy build/GPU, automatically
+        # restart with standard attention rather than losing the job.
+        requested=ATTENTION_BACKEND if ATTENTION_BACKEND in ('ck','sage','standard') else 'ck'
+        backends=[requested]
+        if requested != 'standard':
+            backends.append('standard')
+
+        last_rc=None
+        for backend in backends:
+            if _proc is None or _proc.poll() is not None:
+                _start(backend)
+            deadline=time.time()+180
+            while time.time()<deadline:
+                rc=_proc.poll()
+                if rc is not None:
+                    last_rc=rc
+                    print(f'ComfyUI backend {backend} exited rc={rc}; trying fallback',flush=True)
+                    break
+                try:
+                    _http('/system_stats',timeout=2)
+                    return
+                except Exception:
+                    time.sleep(1)
+            else:
+                try:
+                    _proc.terminate()
+                except Exception:
+                    pass
+                last_rc='readiness-timeout'
+            _proc=None
+        raise RuntimeError(f'ComfyUI failed to start; last_rc={last_rc}')
 
 def preflight():
     ensure_models()
@@ -143,7 +185,7 @@ def preflight():
     missing_nodes=sorted(REQUIRED_NODES-set(info.keys()))
     return {'ok':not missing_nodes,'stage':'ready' if not missing_nodes else 'nodes',
             'models':len(REQUIRED_MODELS),'missing_nodes':missing_nodes,
-            'service':'h3-runpod-worker','version':'0.6.7'}
+            'service':'h3-runpod-worker','version':'0.7.0','attention_backend':ACTIVE_ATTENTION_BACKEND,'comfy_compiler':False}
 
 def restore_images(items):
     d=COMFY_DIR/'input'; d.mkdir(parents=True,exist_ok=True)
@@ -199,7 +241,7 @@ def handler(job):
                 gpu={'cuda_available':False}
         except Exception as e:
             gpu={'diagnostic_error':str(e)}
-        return {'ok':True,'service':'h3-runpod-worker','version':'0.6.7','models_required':len(REQUIRED_MODELS),'model_root':str(MODEL_ROOT),'base_model_store':BASE_REPO,'gpu':gpu}
+        return {'ok':True,'service':'h3-runpod-worker','version':'0.7.0','models_required':len(REQUIRED_MODELS),'model_root':str(MODEL_ROOT),'base_model_store':BASE_REPO,'gpu':gpu}
     if inp.get('diagnose_model_cache') is True:
         return {
             'ok': True,
@@ -410,7 +452,7 @@ def handler(job):
                     'continuation':'last_frame','mode':'fast-segmented',
                     'profile':actual_profile,'prompt_used':effective_prompt,
                     'worker_seconds':round(time.time()-worker_t0,2),'gpu':gpu_name,
-                    'timings':timings,'speed_profile':actual_profile,'turbo_steps':target_steps if max_speed else None}
+                    'timings':timings,'speed_profile':actual_profile,'turbo_steps':target_steps if max_speed else None,'attention_backend':ACTIVE_ATTENTION_BACKEND,'comfy_compiler':False}
         finally:
             import shutil
             shutil.rmtree(work,ignore_errors=True)
