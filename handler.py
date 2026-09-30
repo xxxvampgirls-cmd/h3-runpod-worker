@@ -185,7 +185,7 @@ def preflight():
     missing_nodes=sorted(REQUIRED_NODES-set(info.keys()))
     return {'ok':not missing_nodes,'stage':'ready' if not missing_nodes else 'nodes',
             'models':len(REQUIRED_MODELS),'missing_nodes':missing_nodes,
-            'service':'h3-runpod-worker','version':'0.7.0','attention_backend':ACTIVE_ATTENTION_BACKEND,'comfy_compiler':False}
+            'service':'h3-runpod-worker','version':'0.7.1','attention_backend':ACTIVE_ATTENTION_BACKEND,'comfy_compiler':False}
 
 def restore_images(items):
     d=COMFY_DIR/'input'; d.mkdir(parents=True,exist_ok=True)
@@ -195,6 +195,49 @@ def restore_images(items):
         if not b64: continue
         if ',' in b64 and b64.lstrip().startswith('data:'): b64=b64.split(',',1)[1]
         (d/name).write_bytes(base64.b64decode(b64))
+
+def cleanup_runtime_files(max_age_seconds=1800, aggressive=False):
+    """Remove stale per-job files without touching model caches or installed code."""
+    now=time.time()
+    freed=0
+    removed=0
+    scanned=0
+    targets=[
+        (COMFY_DIR/'temp', None),
+        (COMFY_DIR/'output', None),
+        (COMFY_DIR/'input', ('h3_', 'h3_continue_', 'H3_Studio')),
+    ]
+    for root,prefixes in targets:
+        if not root.exists():
+            continue
+        for p in root.rglob('*'):
+            if not p.is_file():
+                continue
+            scanned += 1
+            try:
+                if prefixes and not p.name.startswith(prefixes):
+                    continue
+                age=now-p.stat().st_mtime
+                if aggressive or age >= max_age_seconds:
+                    size=p.stat().st_size
+                    p.unlink(missing_ok=True)
+                    freed += size
+                    removed += 1
+            except Exception as e:
+                print('cleanup warning:', str(p), type(e).__name__, str(e)[:200], flush=True)
+    # Clean abandoned segmentation scratch dirs from interrupted jobs.
+    import tempfile, shutil
+    tmp_root=pathlib.Path(tempfile.gettempdir())
+    for p in tmp_root.glob('h3_segments_*'):
+        try:
+            if p.is_dir() and (aggressive or now-p.stat().st_mtime >= max_age_seconds):
+                size=sum(x.stat().st_size for x in p.rglob('*') if x.is_file())
+                shutil.rmtree(p,ignore_errors=True)
+                freed += size
+                removed += 1
+        except Exception:
+            pass
+    return {'removed':removed,'freed_bytes':freed,'freed_mb':round(freed/1048576,2),'scanned':scanned}
 
 def find_video(outputs):
     for node in (outputs or {}).values():
@@ -206,7 +249,19 @@ def find_video(outputs):
 
 def video_bytes(item):
     q=parse.urlencode({'filename':item['filename'],'subfolder':item.get('subfolder',''),'type':item.get('type','output')})
-    with request.urlopen(BASE+'/view?'+q,timeout=300) as r: return r.read()
+    with request.urlopen(BASE+'/view?'+q,timeout=300) as r:
+        raw=r.read()
+    # The video has already been copied into the API response; keeping a second
+    # server-side copy only wastes ephemeral disk.
+    try:
+        kind=item.get('type','output')
+        root=COMFY_DIR/('output' if kind=='output' else kind)
+        fp=root/(item.get('subfolder') or '')/item['filename']
+        fp.resolve().relative_to(root.resolve())
+        fp.unlink(missing_ok=True)
+    except Exception as e:
+        print('post-read cleanup warning:', type(e).__name__, str(e)[:200], flush=True)
+    return raw
 
 def video_thumbnail_base64(raw):
     """Extract a compact JPEG preview on the worker; Docker already includes ffmpeg."""
@@ -229,6 +284,10 @@ def video_thumbnail_base64(raw):
 
 def handler(job):
     inp=(job or {}).get('input') or {}
+    if inp.get('cleanup') is True:
+        aggressive=bool(inp.get('aggressive_cleanup', False))
+        stats=cleanup_runtime_files(max_age_seconds=0 if aggressive else 1800, aggressive=aggressive)
+        return {'ok':True,'service':'h3-runpod-worker','version':'0.7.1','cleanup':stats,'aggressive':aggressive}
     if inp.get('healthcheck') is True:
         gpu={}
         try:
@@ -241,7 +300,7 @@ def handler(job):
                 gpu={'cuda_available':False}
         except Exception as e:
             gpu={'diagnostic_error':str(e)}
-        return {'ok':True,'service':'h3-runpod-worker','version':'0.7.0','models_required':len(REQUIRED_MODELS),'model_root':str(MODEL_ROOT),'base_model_store':BASE_REPO,'gpu':gpu}
+        return {'ok':True,'service':'h3-runpod-worker','version':'0.7.1','models_required':len(REQUIRED_MODELS),'model_root':str(MODEL_ROOT),'base_model_store':BASE_REPO,'gpu':gpu}
     if inp.get('diagnose_model_cache') is True:
         return {
             'ok': True,
@@ -292,6 +351,9 @@ def handler(job):
                             break
             print(f"AUTO SCENE enabled: tagged_prompt_nodes={tagged} dialogue={bool(dialogue)} ambience={bool(ambience)}", flush=True)
 
+    cleanup_stats=cleanup_runtime_files(max_age_seconds=int(os.getenv('H3_CLEANUP_AGE','1800')))
+    timings['cleanup']=cleanup_stats
+    stage_t0=time.time()
     ensure_models()
     timings['ensure_models']=round(time.time()-stage_t0,3)
     stage_t0=time.time()
