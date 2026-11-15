@@ -135,7 +135,9 @@ def inspect(output, now=None):
                     newest and newest < now - 24 * 3600):
                 totals["failed_count"] += 1
                 totals["failed_bytes"] += folder_bytes
-                totals["failed"].append({"path": str(run), "bytes": folder_bytes})
+                totals["failed"].append({"path": str(run), "bytes": folder_bytes,
+                                          "recovery": recovery_evidence(run),
+                                          "status": request.get("status","failed")})
         if folder_bytes:
             totals["large_runs"].append({"name": run.parent.name + "/" + run.name[:10], "bytes": folder_bytes})
     totals["large_runs"] = sorted(totals["large_runs"], key=lambda x:x["bytes"], reverse=True)[:6]
@@ -194,6 +196,17 @@ def eligible_failed(folder, root, now=None):
         if sub.is_dir() and sub.name != "video.artifacts":
             raise ValueError("В папке есть неизвестный каталог")
     return amount
+
+
+def recycle_failed(folder, output, recycler):
+    """Only a verified old failed generation, through an injected Recycle Bin API.
+
+    Never call rmtree/unlink; if Windows refuses recycling, the folder stays.
+    """
+    amount=eligible_failed(folder,output)
+    recycler(str(Path(folder)))
+    return amount
+
 
 
 def api_query(clean=False, ports=(8188, 8189, 8190)):
