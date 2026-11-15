@@ -1580,7 +1580,35 @@ class App(tk.Tk):
         self.destroy()
 
 if __name__=="__main__":
-    if "--smoke-ui" in sys.argv:
+    if "--smoke-codecs" in sys.argv:
+        # Runs from the actual Windows EXE after PyInstaller bundling, not
+        # only from the CI Python interpreter. No Tk windows or audio needed.
+        import tempfile
+        import imageio_ffmpeg
+        from ffpyplayer.player import MediaPlayer
+        from studio_player import VideoPlayer
+        from PIL import Image
+        assert VideoPlayer._format_time(125)=="02:05"
+        with tempfile.TemporaryDirectory() as tmp:
+            video=Path(tmp)/"smoke-test.avi"
+            ff=imageio_ffmpeg.get_ffmpeg_exe()
+            subprocess.run([ff,"-hide_banner","-loglevel","error","-y",
+                "-f","lavfi","-i","color=c=red:s=64x64:r=12:d=1",
+                "-c:v","mpeg4","-t","1",str(video)],check=True,timeout=20,
+                creationflags=getattr(subprocess,"CREATE_NO_WINDOW",0))
+            player=MediaPlayer(str(video),ff_opts={"an":True,"out_fmt":"rgb24"})
+            frame=None
+            try:
+                for _ in range(100):
+                    frame,wait=player.get_frame()
+                    if frame is not None:break
+                    time.sleep(.025)
+                assert frame is not None, "Bundled player could not decode a video frame"
+                image,pts=frame
+                assert image.get_size()==(64,64)
+            finally:
+                player.close_player()
+    elif "--smoke-ui" in sys.argv:
         # Windows CI exercises real Tk startup, deletion of a user prompt and
         # the Disk Control dialog. The runner is disposable.
         import tempfile
