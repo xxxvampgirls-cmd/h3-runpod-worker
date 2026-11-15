@@ -2,7 +2,7 @@
 Independent companion application; export/import PromptDock JSON v1 (+ galleryImages extension).
 GPL-3.0-or-later.
 """
-import base64, json, os, shutil, time, uuid, mimetypes, subprocess, re, stat, math
+import base64, json, os, shutil, time, uuid, mimetypes, subprocess, re, stat, math, sys, threading
 from send2trash import send2trash
 from pathlib import Path
 import tkinter as tk
@@ -12,6 +12,10 @@ from PIL import Image, ImageTk
 ROOT=Path(os.environ.get("LOCALAPPDATA") or Path.home())/"PromptDock-FreeVideo-Studio"
 DB=ROOT/"library.json"
 PHOTOS=ROOT/"images"
+THUMBS=ROOT/"thumbnails"
+BRIDGE_NAME="promptdock_freevideo_bridge"
+def package_bridge_path():
+    return Path(getattr(sys,"_MEIPASS",Path(__file__).parent))/"bridge"
 PIC={".png",".jpg",".jpeg",".webp",".gif"}
 
 def load_json(path, limit=8_000_000):
@@ -189,6 +193,35 @@ def validate_deletion_folder(item, output):
     return folder,total
 
 
+
+def build_preview(video):
+    """Create a cached 1-second still with a bundled CPU ffmpeg.
+    Never writes into FreeVideo output; only uses the companion's cache.
+    """
+    video=Path(video)
+    if not video.is_file():return None
+    try:
+        import imageio_ffmpeg
+        THUMBS.mkdir(parents=True,exist_ok=True)
+        signature=f"{video.resolve()}:{video.stat().st_size}:{video.stat().st_mtime_ns}"
+        import hashlib
+        digest=hashlib.sha256(signature.encode("utf-8")).hexdigest()[:28]
+        dest=THUMBS/(digest+".jpg")
+        if dest.is_file() and dest.stat().st_size>500:return str(dest)
+        temp=THUMBS/(digest+".tmp.jpg")
+        args=[imageio_ffmpeg.get_ffmpeg_exe(),"-nostdin","-hide_banner","-loglevel","error",
+              "-ss","0.8","-i",str(video),"-frames:v","1","-vf",
+              "scale='min(600,iw)':-2", "-q:v","4","-y",str(temp)]
+        flags=getattr(subprocess,"CREATE_NO_WINDOW",0)
+        result=subprocess.run(args,capture_output=True,timeout=20,creationflags=flags)
+        if result.returncode==0 and temp.is_file() and temp.stat().st_size>500:
+            temp.replace(dest)
+            return str(dest)
+        temp.unlink(missing_ok=True)
+    except (OSError,ValueError,RuntimeError,subprocess.TimeoutExpired):
+        pass
+    return None
+
 def pics(row):
     out=[]
     for item in [row.get("preview",""),*row.get("images",[])]:
@@ -204,7 +237,7 @@ class App(tk.Tk):
         self.db=load_json(DB,30_000_000)
         self.db.setdefault("items",{})
         if not isinstance(self.db["items"],dict):self.db["items"]={}
-        self.selected=None;self.group="Все";self.keep=[];self.gallery=[]
+        self.selected=None;self.group="Все";self.keep=[];self.gallery=[];self.preview_image=None;self.preview_requested=set()
         self.title("PromptDock × FreeVideo Studio  |  Windows")
         self.geometry("1470x870");self.minsize(1090,710)
         self.configure(bg="#0c121f")
@@ -240,7 +273,8 @@ class App(tk.Tk):
 
         for name,cmd in [("📂 output",self.pick_output),("⟳ Обновить",self.scan),
             ("＋ Промпт",self.new),("⬆ Импорт JSON",self.import_json),
-            ("⬇ Экспорт в PromptDock",self.export_json),("LoRA",self.lora_window)]:
+            ("⬇ Экспорт в PromptDock",self.export_json),("LoRA",self.lora_window),
+            ("⇄ Подключить FreeVideo",self.install_bridge)]:
             self.btn(top,name,cmd,name=="📂 output").pack(side="left",padx=3)
         self.search=tk.StringVar()
         ttk.Entry(top,textvariable=self.search,width=25).pack(side="right",padx=5)
@@ -276,7 +310,12 @@ class App(tk.Tk):
         tk.Button(deletion,text="Удалить навсегда",command=lambda:self.delete_selected(True),
             bg="#723341",fg="white",activeforeground="white",activebackground="#9e394b",
             relief="flat",font=("Segoe UI",9),cursor="hand2",padx=8,pady=7).pack(side="left",fill="x",expand=True,padx=2)
-        right=tk.Frame(panel,bg="#19283c",padx=15,pady=13);panel.add(right,minsize=500)
+        workspace=tk.Frame(panel,bg="#19283c",padx=8,pady=8);panel.add(workspace,minsize=520)
+        preview_side=tk.Frame(workspace,bg="#122238",width=255)
+        preview_side.pack(side="right",fill="y",padx=(9,0))
+        preview_side.pack_propagate(False)
+        right=tk.Frame(workspace,bg="#19283c",padx=6,pady=6)
+        right.pack(side="left",fill="both",expand=True)
         tk.Label(right,text="   РЕДАКТОР ПРОМПТА",fg="#b7d3f4",bg="#19283c",
                  font=("Segoe UI",10,"bold")).pack(fill="x",anchor="w",pady=(0,9))
         line=tk.Frame(right,bg="#19283c");line.pack(fill="x")
@@ -293,6 +332,18 @@ class App(tk.Tk):
         self.body=tk.Text(right,wrap="word",height=10,bg="#101c2d",fg="#f1f6ff",
             insertbackground="white",relief="flat",font=("Consolas",10),padx=9,pady=9)
         self.body.pack(fill="both",expand=True)
+        apply_row=tk.Frame(right,bg="#19283c",pady=6)
+        apply_row.pack(fill="x",before=self.body)
+        self.apply_text=tk.BooleanVar(value=True)
+        self.apply_loras=tk.BooleanVar(value=True)
+        self.apply_seed=tk.BooleanVar(value=True)
+        self.apply_size=tk.BooleanVar(value=False)
+        for label,state in [("Текст",self.apply_text),("LoRA",self.apply_loras),
+                            ("Seed",self.apply_seed),("Размер/время",self.apply_size)]:
+            tk.Checkbutton(apply_row,text=label,variable=state,bg="#19283c",fg="#c8d9f2",
+                           selectcolor="#294768",activebackground="#19283c",activeforeground="#ffffff",
+                           font=("Segoe UI",9)).pack(side="left",padx=2)
+        self.btn(apply_row,"⇢ Применить в FreeVideo",self.apply_to_freevideo,True).pack(side="right",padx=4)
         controls=tk.Frame(right,bg="#19283c",pady=8);controls.pack(fill="x")
         for label,cmd in [("📋 Копировать",self.copy),("▶ Видео",self.video),
             ("📂 Папка",self.open_folder),("⧉ Дубликат",self.duplicate)]:
@@ -309,7 +360,7 @@ class App(tk.Tk):
                  font=("Segoe UI",9),padx=9,pady=3)
         self.lora_count.pack(side="right")
         self.lora_tree=ttk.Treeview(lora_card,columns=("strength","alpha","state"),
-                show="tree headings",height=5,style="Lora.Treeview",selectmode="browse")
+                show="tree headings",height=5,style="Lora.Treeview",selectmode="extended")
         self.lora_tree.heading("#0",text="Файл LoRA")
         self.lora_tree.heading("strength",text="Strength")
         self.lora_tree.heading("alpha",text="Alpha")
@@ -322,14 +373,29 @@ class App(tk.Tk):
         self.lora_tree.configure(yscrollcommand=lora_scroll.set)
         self.lora_tree.pack(side="left",fill="both",expand=True)
         lora_scroll.pack(side="right",fill="y")
+        tk.Label(lora_card,text="Выдели несколько LoRA через Ctrl / Shift; без выделения применяются все.",
+            bg="#142136",fg="#8daccd",font=("Segoe UI",8)).pack(side="bottom",anchor="w")
 
-        gallery=tk.Frame(right,bg="#121f32",padx=8,pady=8,highlightbackground="#304660",highlightthickness=1);gallery.pack(fill="x",pady=(9,2))
-        header=tk.Frame(gallery,bg="#121f32");header.pack(fill="x")
-        tk.Label(header,text="▣  МИНИ-ГАЛЕРЕЯ / ПРЕВЬЮ",bg="#121f32",fg="#a8deff",font=("Segoe UI",10,"bold")).pack(side="left",padx=5)
-        self.btn(header,"＋ Фото",self.add_photo).pack(side="right",padx=3)
-        self.btn(header,"Удалить своё фото",self.del_photo).pack(side="right",padx=3)
-        self.frames=tk.Frame(gallery,bg="#121f32",height=112)
-        self.frames.pack(fill="x",pady=4);self.frames.pack_propagate(False)
+        # Sidebar: preview stays visible even when the text editor becomes short.
+        gallery=tk.Frame(preview_side,bg="#122238",padx=8,pady=9,highlightbackground="#335371",highlightthickness=1)
+        gallery.pack(fill="both",expand=True)
+        tk.Label(gallery,text="◈  ПРЕВЬЮ",bg="#122238",fg="#95ddff",
+            font=("Segoe UI",11,"bold")).pack(anchor="w",pady=(0,8))
+        self.preview_label=tk.Label(gallery,text="Выбери видео\nдля просмотра",
+            bg="#081320",fg="#7f9ebf",font=("Segoe UI",10),width=26,height=11,
+            cursor="hand2",relief="flat")
+        self.preview_label.pack(fill="x",pady=3)
+        self.preview_label.bind("<Button-1>",lambda e:self.zoom(0) if self.gallery else self.video())
+        self.btn(gallery,"▶ Открыть видео",self.video,True).pack(fill="x",pady=6)
+        tk.Label(gallery,text="МИНИ-ГАЛЕРЕЯ",bg="#122238",fg="#b5ccf2",
+            font=("Segoe UI",9,"bold")).pack(anchor="w",pady=(12,4))
+        self.frames=tk.Frame(gallery,bg="#122238",height=195)
+        self.frames.pack(fill="x")
+        self.frames.pack_propagate(False)
+        bar=tk.Frame(gallery,bg="#122238")
+        bar.pack(fill="x",side="bottom",pady=6)
+        self.btn(bar,"＋ Фото",self.add_photo).pack(fill="x",pady=(0,5))
+        self.btn(bar,"Удалить фото",self.del_photo).pack(fill="x")
         self.status=tk.Label(self,text="Готово к работе  •  Открой output FreeVideo — твои ролики останутся на месте.",
             bg="#121e30",fg="#a9cfed",anchor="w",padx=16,pady=10,font=("Segoe UI",10))
         self.status.pack(fill="x")
@@ -398,7 +464,7 @@ class App(tk.Tk):
             def num(v):
                 if type(v) not in (int,float):return "—"
                 return f"{v:g}"
-            self.lora_tree.insert("",tk.END,text=row.get("name","—"),values=(
+            self.lora_tree.insert("",tk.END,iid=str(self.lora_tree.get_children().__len__()),text=row.get("name","—"),values=(
                 num(row.get("strength")),num(row.get("alpha")),row.get("source","—")))
 
     def save(self,redraw=True):
