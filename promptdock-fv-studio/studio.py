@@ -3,6 +3,7 @@ Independent companion application; export/import PromptDock JSON v1 (+ galleryIm
 GPL-3.0-or-later.
 """
 import base64, json, os, shutil, time, uuid, mimetypes, subprocess, re, stat, math
+from send2trash import send2trash
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog as fd, messagebox as mb, simpledialog as sd
@@ -146,6 +147,48 @@ def from_freevideo(folder):
         except (OSError,ValueError,UnicodeError,IndexError):continue
     return sorted(rows,key=lambda r:r["createdAt"],reverse=True)
 
+
+def _is_reparse(path):
+    """Reject symlinks and Windows junctions/reparse points."""
+    try:
+        info=os.lstat(path)
+        return stat.S_ISLNK(info.st_mode) or bool(getattr(info, "st_file_attributes", 0) & 0x400)
+    except OSError: return True
+
+def validate_deletion_folder(item, output):
+    """Only a complete FreeVideo run at output/FreeVideo/YYYY-MM-DD/32hex."""
+    if item.get("source") != "FreeVideo" or not item.get("video"):
+        raise ValueError("Это не видео FreeVideo")
+    root=Path(output).expanduser()
+    if root.name.casefold() != "freevideo":root=root/"FreeVideo"
+    if not root.is_dir() or _is_reparse(root):
+        raise ValueError("Папка output не подключена или является ссылкой")
+    root=root.resolve(strict=True)
+    video=Path(item["video"])
+    folder=video.parent
+    if video.name!="video.mp4" or not re.fullmatch(r"\d{4}-\d{2}-\d{2}",folder.parent.name):
+        raise ValueError("Неизвестная структура папки FreeVideo")
+    if not re.fullmatch(r"[0-9a-f]{32}",folder.name):
+        raise ValueError("Неизвестный идентификатор генерации")
+    if folder.parent.parent.resolve(strict=True)!=root or _is_reparse(folder.parent) or _is_reparse(folder) or _is_reparse(video):
+        raise ValueError("Путь выходит за пределы output или содержит ссылку")
+    if not video.is_file() or not video.stat().st_size:
+        raise ValueError("Видео отсутствует или ещё записывается")
+    request=load_json(folder/"comfy-request.json")
+    if request.get("status")!="complete":
+        raise ValueError("Генерация не подтверждена как завершённая")
+    # Walking *without* following symlinks, reject Windows junctions anywhere
+    # so deletion can never follow a nested link into unrelated data.
+    total=0
+    for dirpath, dirs, files in os.walk(folder, followlinks=False):
+        for filename in dirs+files:
+            entry=Path(dirpath)/filename
+            if _is_reparse(entry):
+                raise ValueError("В папке обнаружена ссылка или точка подключения")
+            if entry.is_file():total+=entry.stat().st_size
+    return folder,total
+
+
 def pics(row):
     out=[]
     for item in [row.get("preview",""),*row.get("images",[])]:
@@ -204,13 +247,20 @@ class App(tk.Tk):
         middle=tk.Frame(panel,bg="#19283c",width=330);panel.add(middle,minsize=220)
         tk.Label(middle,text="ПРОМПТЫ",bg="#19283c",fg="#abc5e7",pady=10).pack()
         scroll=ttk.Scrollbar(middle)
-        self.tree=ttk.Treeview(middle,columns=("src",),show="tree headings",yscrollcommand=scroll.set)
+        self.tree=ttk.Treeview(middle,columns=("src",),show="tree headings",selectmode="extended",yscrollcommand=scroll.set)
         scroll.config(command=self.tree.yview)
         self.tree.heading("#0",text="Название");self.tree.heading("src",text="Источник")
         self.tree.column("#0",width=240,minwidth=100)
         self.tree.column("src",width=95,minwidth=60,stretch=False)
         self.tree.pack(side="left",fill="both",expand=True);scroll.pack(side="right",fill="y")
         self.tree.bind("<<TreeviewSelect>>",self.choose_item)
+        tk.Label(middle,text="Ctrl / Shift — выбор нескольких роликов",bg="#19283c",fg="#9fb6d7",font=("Segoe UI",9)).pack(fill="x",side="bottom",pady=4)
+        deletion=tk.Frame(middle,bg="#19283c")
+        deletion.pack(fill="x",side="bottom",padx=5,pady=5)
+        self.btn(deletion,"В корзину",lambda:self.delete_selected(False)).pack(side="left",fill="x",expand=True,padx=2)
+        tk.Button(deletion,text="Удалить навсегда",command=lambda:self.delete_selected(True),
+            bg="#723341",fg="white",activeforeground="white",activebackground="#9e394b",
+            relief="flat",font=("Segoe UI",9),cursor="hand2",padx=8,pady=7).pack(side="left",fill="x",expand=True,padx=2)
         right=tk.Frame(panel,bg="#1b293d",padx=12,pady=10);panel.add(right,minsize=450)
         line=tk.Frame(right,bg="#1b293d");line.pack(fill="x")
         self.titlevar=tk.StringVar()
@@ -275,6 +325,7 @@ class App(tk.Tk):
     def choose_item(self,e):
         selection=self.tree.selection()
         if not selection:return
+        if len(selection)!=1:return
         key=selection[0]
         if key==self.selected:return
         if self.selected:self.save(False)
@@ -340,6 +391,8 @@ class App(tk.Tk):
         rows=from_freevideo(folder);new=0
         for item in rows:
             key=item["id"]
+            if key not in self.db["items"] and key in self.db.get("deletedHistory",{}):
+                self.db["items"][key]=self.db["deletedHistory"].pop(key)
             if key in self.db["items"]:
                 it=self.db["items"][key]
                 it.update({name:item[name] for name in ("video","preview","seed","geometry","loras","loraDetails")})
@@ -368,6 +421,63 @@ class App(tk.Tk):
         if not p.is_file():return
         if os.name=="nt":subprocess.Popen(["explorer",'/select,'+str(p)])
         else:subprocess.Popen(["xdg-open",str(p.parent)])
+
+    def delete_selected(self, permanent=False):
+        selected=list(self.tree.selection())
+        if not selected and self.selected:selected=[self.selected]
+        if not selected:return
+        self.save(False)
+        records=[]
+        errors=[]
+        for key in selected:
+            item=self.db["items"].get(key,{})
+            try:
+                folder,size=validate_deletion_folder(item,self.db.get("output",""))
+                records.append((key,folder,size))
+            except (OSError,ValueError) as error:
+                errors.append((item.get("title",key),str(error)))
+        if not records:
+            mb.showwarning("Удаление недоступно","Выбери завершённые видео FreeVideo.\n"+
+                           "\n".join(f"{name[:40]}: {reason}" for name,reason in errors[:6]))
+            return
+        total=sum(r[2] for r in records)
+        folders=len(records)
+        capacity=f"{total / (1024**3):.2f} ГБ" if total>=1024**3 else f"{total / (1024**2):.1f} МБ"
+        head=(f"Будет удалено папок: {folders}\nОбщий объём: {capacity}\n"
+              "Удаляются целые папки генераций, включая MP4, превью и метаданные.\n"
+              "Исходные файлы FreeVideo других генераций не изменятся.")
+        if errors:head+=f"\nПропущено защищённых или неподходящих: {len(errors)}."
+        if permanent:
+            head+="\n\nВНИМАНИЕ: восстановление через Корзину будет невозможно."
+            if not mb.askyesno("Безвозвратное удаление",head,parent=self,icon="warning"):return
+            typed=sd.askstring("Подтверждение",f"Для безвозвратного удаления {folders} папок введи слово УДАЛИТЬ:",parent=self)
+            if typed!="УДАЛИТЬ":return
+        elif not mb.askyesno("Переместить в Корзину",head+"\n\nПереместить в Корзину Windows?",
+                              parent=self,icon="warning"):return
+        ok=0;failed=[]
+        for key,folder,_ in records:
+            try:
+                # Revalidate immediately before writing to reduce accidental deletions.
+                check,_=validate_deletion_folder(self.db["items"][key],self.db.get("output",""))
+                if check!=folder:raise ValueError("Путь изменился")
+                if permanent:shutil.rmtree(folder)
+                else:send2trash(str(folder))
+                # Keep notes for potential recovery after restoring from Recycle Bin.
+                self.db.setdefault("deletedHistory",{})[key]=self.db["items"][key]
+                del self.db["items"][key]
+                ok+=1
+            except (OSError,ValueError) as error:failed.append(f"{folder.name}: {error}")
+        if self.selected not in self.db["items"]:
+            self.selected=None
+            self.titlevar.set("");self.catvar.set("");self.tagvar.set("")
+            self.body.delete("1.0",tk.END)
+            self.info.config(text="")
+            self.show_gallery()
+        self.persist();self.fill()
+        result=f"Удалено папок: {ok}/{folders}. Выбранный объём: {capacity}."
+        if failed:result+="\nНе удалось:\n"+"\n".join(failed[:8])
+        mb.showinfo("Удаление завершено",result)
+        self.status.config(text=result.split("\n")[0])
 
     def show_gallery(self):
         for child in self.frames.winfo_children():child.destroy()
