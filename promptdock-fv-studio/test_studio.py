@@ -1,10 +1,13 @@
 import json
+import os
+import time
 import tempfile
 import unittest
 import sys
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from studio import extract_loras, read_lora_details, from_freevideo, validate_deletion_folder
+from cleanup import inspect, eligible_failed
 
 class FreeVideoSafetyTests(unittest.TestCase):
     def test_media_reads_all_five_with_strength(self):
@@ -58,5 +61,51 @@ class FreeVideoSafetyTests(unittest.TestCase):
             (folder/"comfy-request.json").write_text(json.dumps({"status":"running"}))
             with self.assertRaises(ValueError):
                 validate_deletion_folder(rows[0],str(root.parent))
+
+    def test_disk_audit_is_readonly_and_respects_preview(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d)/"output"/"FreeVideo"
+            done=root/"2026-11-15"/("b"*32)
+            fail=root/"2026-11-14"/("c"*32)
+            done.mkdir(parents=True)
+            fail.mkdir(parents=True)
+            (done/"video.mp4").write_bytes(b"mp4"+b"x"*100)
+            (done/"comfy-request.json").write_text(json.dumps({"status":"complete"}))
+            (done/"video.request.json").write_text(json.dumps({"success":True}))
+            art=done/"video.artifacts";art.mkdir()
+            (art/"rgb.npy").write_bytes(b"r"*12_000)
+            (art/"latents.pt").write_bytes(b"l"*44_000)
+            (fail/"prompt.txt").write_text("bad take")
+            record=fail/"comfy-request.json"
+            record.write_text(json.dumps({"status":"failed"}))
+            before=time.time()-48*3600
+            for p in [fail/"prompt.txt",record]:os.utime(p,(before,before))
+            stats=inspect(root.parent,now=time.time())
+            self.assertEqual(stats["videos"],1)
+            self.assertEqual(stats["failed_count"],1)
+            self.assertEqual(stats["working_estimate"],56_000)
+            self.assertTrue((art/"latents.pt").is_file())
+            self.assertGreater(eligible_failed(fail,root.parent),0)
+            (fail/"video.mp4").write_bytes(b"mp4")
+            with self.assertRaises(ValueError):eligible_failed(fail,root.parent)
+            (done/"video.request.json").write_text(json.dumps({"success":True,"preview":True}))
+            stats=inspect(root.parent,now=time.time())
+            self.assertEqual(stats["working_estimate"],12_000)
+            self.assertTrue((done/"video.mp4").exists())
+
+    def test_failed_cleanup_rejects_unknown_content(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d)/"FreeVideo"
+            fail=root/"2026-11-14"/("d"*32)
+            fail.mkdir(parents=True)
+            record=fail/"comfy-request.json"
+            record.write_text(json.dumps({"status":"cancelled"}))
+            user_note=fail/"notes-by-user.txt"
+            user_note.write_text("keep")
+            before=time.time()-40*3600
+            for p in [record,user_note]:os.utime(p,(before,before))
+            with self.assertRaises(ValueError):eligible_failed(fail,root)
+            self.assertTrue(user_note.exists())
+
 if __name__=="__main__":
     unittest.main()
