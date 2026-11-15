@@ -61,9 +61,9 @@ def _resolve_input_path(candidate, input_root):
     except (OSError, RuntimeError, ValueError):
         return None
 
-def linked_originals(output, *documents):
+def linked_originals(output, *documents, input_override=None):
     """Only explicit saved asset references become links; never scan or guess uploads."""
-    input_root = input_root_for_output(output)
+    input_root = Path(input_override).expanduser() if input_override else input_root_for_output(output)
     if input_root is None:
         return []
     seen = set()
