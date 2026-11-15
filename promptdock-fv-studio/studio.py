@@ -553,7 +553,14 @@ class App(tk.Tk):
                  self.db.get("output"), Path(sys.executable).parent, Path.home()]
         detected = discover_custom_nodes(hints)
         if len(detected) == 1:
-            return detected[0]
+            choice = mb.askyesnocancel("Найден FreeVideo / ComfyUI",
+                "Найдена папка подключения:\n\n" + str(detected[0])
+                + "\n\nДа — использовать её.\nНет — выбрать вручную.\n"
+                  "Отмена — не подключать.", parent=self)
+            if choice is True:
+                return detected[0]
+            if choice is None:
+                return None
         if len(detected) > 1:
             answer = {"path": None, "manual": False}
             dialog = tk.Toplevel(self)
