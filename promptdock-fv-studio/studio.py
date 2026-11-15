@@ -131,6 +131,26 @@ def read_lora_details(home, request, workflow):
     return []
 
 
+
+def run_reference_images(home):
+    """Only user-supplied *saved copies* within an individual FreeVideo run.
+
+    FreeVideo also stores the original upload in ComfyUI/input/freevideo/<uuid>,
+    but that is a different permanent directory and is never modified here.
+    """
+    run=Path(home)
+    files=[]
+    for filename in ("first.png","last.png"):
+        p=run/filename
+        if p.is_file() and not _is_reparse(p) and 0<p.stat().st_size<=80_000_000:
+            files.append(str(p))
+    for p in sorted(run.glob("reference-??.png")):
+        if re.fullmatch(r"reference-\d\d\.png",p.name) and p.is_file() and not _is_reparse(p):
+            try:
+                if 0<p.stat().st_size<=80_000_000:files.append(str(p))
+            except OSError:pass
+    return files
+
 def from_freevideo(folder):
     root=Path(folder).expanduser()
     if root.name.casefold()!="freevideo":root=root/"FreeVideo"
@@ -153,6 +173,7 @@ def from_freevideo(folder):
                 seed=req.get("seed") if type(req.get("seed")) is int else None,
                 geometry=req.get("geometry") if isinstance(req.get("geometry"),dict) else {},
                 loras=[r["name"] for r in lora_details],loraDetails=lora_details,
+                sourceImages=run_reference_images(home),
                 createdAt=int(video.stat().st_mtime*1000)))
         except (OSError,ValueError,UnicodeError,IndexError):continue
     return sorted(rows,key=lambda r:r["createdAt"],reverse=True)
@@ -230,7 +251,7 @@ def build_preview(video):
 
 def pics(row):
     out=[]
-    for item in [row.get("preview",""),row.get("generatedPreview",""),*row.get("images",[])]:
+    for item in [row.get("preview",""),row.get("generatedPreview",""),*row.get("sourceImages",[]),*row.get("images",[])]:
         if not item:continue
         p=Path(item)
         if p.is_file() and not p.is_symlink() and p.suffix.lower() in PIC and p not in out:out.append(p)
@@ -398,8 +419,11 @@ class App(tk.Tk):
         self.preview_label.pack(fill="x",pady=3)
         self.preview_label.bind("<Button-1>",lambda e:self.zoom(0) if self.gallery else self.video())
         self.btn(gallery,"▶ Открыть видео",self.video,True).pack(fill="x",pady=3)
-        tk.Label(gallery,text="МИНИ-ГАЛЕРЕЯ",bg="#122238",fg="#b5ccf2",
+        tk.Label(gallery,text="КАДРЫ / РЕФЕРЕНСЫ",bg="#122238",fg="#b5ccf2",
             font=("Segoe UI",9,"bold")).pack(anchor="w",pady=(7,3))
+        self.source_count=tk.Label(gallery,text="Сохранено копий референсов: 0",
+              bg="#122238",fg="#86A9C5",font=("Segoe UI",8),anchor="w")
+        self.source_count.pack(fill="x")
         self.frames=tk.Frame(gallery,bg="#122238",height=152)
         self.frames.pack(fill="x")
         self.frames.pack_propagate(False)
@@ -530,7 +554,7 @@ class App(tk.Tk):
                 self.db["items"][key]=self.db["deletedHistory"].pop(key)
             if key in self.db["items"]:
                 it=self.db["items"][key]
-                it.update({name:item[name] for name in ("video","preview","seed","geometry","loras","loraDetails")})
+                it.update({name:item[name] for name in ("video","preview","seed","geometry","loras","loraDetails","sourceImages")})
                 if not it.get("prompt"):it["prompt"]=item["prompt"]
             else:
                 item.update(category="FreeVideo",tags="",favorite=False,images=[])
@@ -1202,9 +1226,11 @@ class App(tk.Tk):
         for child in self.frames.winfo_children():child.destroy()
         self.keep=[];self.gallery=[];self.preview_image=None
         self.preview_label.configure(image="",text="Нет изображения",width=26,height=9)
+        self.source_count.configure(text="Сохранено копий референсов: 0")
         if not self.selected:return
         item=self.db["items"][self.selected]
         self.gallery=pics(item)
+        self.source_count.configure(text=f"Сохранено копий референсов: {len(item.get('sourceImages',[]))}")
         if self.gallery:
             self.display_large_preview(self.gallery[0])
         elif item.get("video"):
