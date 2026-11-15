@@ -22,7 +22,7 @@ jobs:
       - name: Verify source syntax
         run: python -m py_compile promptdock-fv-studio/studio.py
       - name: Test FreeVideo LoRA scanning and safe folder selection
-        run: python -m unittest discover -s promptdock-fv-studio -p "test_*.py" -v
+        run: python promptdock-fv-studio/test_studio.py -v
       - name: Check FreeVideo browser bridge syntax
         run: node --check promptdock-fv-studio/bridge/web/bridge.js
       - name: Build standalone EXE
