@@ -90,6 +90,16 @@ class FreeVideoSafetyTests(unittest.TestCase):
             self.assertIn("video.artifacts/latents.pt",indicators)
             self.assertTrue((run/"first.png").is_file())
 
+    def test_failed_retry_artifacts_require_warning(self):
+        from cleanup import recovery_evidence
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            retry=root/"video.artifacts"/"attempts"/"01-retry"
+            retry.mkdir(parents=True)
+            (retry/"latents.pt").write_bytes(b"latent-data")
+            findings=recovery_evidence(root)
+            self.assertTrue(any("attempts/01-retry/latents.pt" in p for p in findings))
+
     def test_own_player_class_can_be_imported_without_automatic_launch(self):
         from studio_player import VideoPlayer
         self.assertEqual(VideoPlayer._format_time(125),"02:05")
