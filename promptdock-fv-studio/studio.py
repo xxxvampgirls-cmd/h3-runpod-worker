@@ -11,7 +11,7 @@ from PIL import Image, ImageTk
 from bridge_payloads import BRIDGE_INIT, BRIDGE_JS
 from bridge_discovery import discover_custom_nodes, normalize_custom_nodes
 from ui_widgets import PillButton
-from cleanup import inspect as inspect_storage, api_query, eligible_failed, root_dir
+from cleanup import inspect as inspect_storage, api_query, eligible_failed, recovery_evidence, root_dir
 from bridge_embedded import BRIDGE_PY, BRIDGE_JS
 from integration import discover as discover_comfyui, nodes_from_choice as resolve_custom_nodes
 from reference_links import linked_originals
@@ -344,8 +344,7 @@ class App(tk.Tk):
                  font=("Segoe UI",9)).pack(fill="x",side="bottom",pady=3)
         self.tree.pack(side="left",fill="both",expand=True)
         scroll.pack(side="right",fill="y")
-        self.btn(deletion,"Видео → Корзина",lambda:self.delete_selected(False)).pack(side="left",fill="x",expand=True,padx=2)
-        self.btn(deletion,"Видео навсегда",lambda:self.delete_selected(True),palette="danger").pack(side="left",fill="x",expand=True,padx=2)
+        self.btn(deletion,"Видео → Корзина Windows",self.delete_selected).pack(side="left",fill="x",expand=True,padx=2)
         workspace=tk.Frame(panel,bg="#19283c",padx=8,pady=8);panel.add(workspace,minsize=520)
         preview_side=tk.Frame(workspace,bg="#122238",width=255)
         preview_side.pack(side="right",fill="y",padx=(9,0))
@@ -1055,14 +1054,14 @@ class App(tk.Tk):
         actions.pack(fill="x",padx=16,pady=5)
         self.btn(actions,"⟳  Проверить",self.refresh_storage_audit).pack(side="left",padx=4)
         self.btn(actions,"✓  Штатная очистка",self.clear_official,True).pack(side="left",padx=4)
-        self.btn(actions,"✕  Старые сбои",self.delete_old_failed,palette="danger").pack(side="left",padx=4)
+        self.btn(actions,"⊞  Неудачные генерации",self.delete_old_failed,palette="danger").pack(side="left",padx=4)
         extras=tk.Frame(win,bg="#0D1626")
         extras.pack(fill="x",padx=16,pady=(0,8))
         self.btn(extras,"Очистить кэш миниатюр",self.clear_preview_cache).pack(side="left",padx=4)
         self.btn(extras,"Открыть output",self.open_output).pack(side="left",padx=4)
         self.btn(extras,"Закрыть",closing).pack(side="right",padx=4)
         tk.Label(win,text="Важно: проверка ничего не удаляет. Штатная очистка выполняется самой FreeVideo.\n"
-                 "Старые неудачные папки удаляются только с отдельным двойным подтверждением.",
+                 "Неудачные генерации перемещаются только в Корзину Windows, после проверки содержимого.",
                  bg="#0D1626",fg="#7898BA",justify="left",font=("Segoe UI",9),
                  pady=10).pack(side="bottom",fill="x",padx=22)
         self.paint_storage_dialog()
@@ -1145,37 +1144,70 @@ class App(tk.Tk):
         threading.Thread(target=worker,daemon=True).start()
 
     def delete_old_failed(self):
+        """Two risk categories, neither can be removed permanently by Studio."""
         state=self.disk_report or {}
-        if "failed" not in state or not state["failed"]:
-            mb.showinfo("Старые сбои","Нет старых завершённых ошибкой папок для удаления.",
+        candidates=state.get("failed",[])
+        if not candidates:
+            mb.showinfo("Неудачные генерации",
+                "Нет старых неудачных генераций (failed/cancelled старше 24 часов).",
                 parent=self.disk_window or self)
             return
-        candidates=state["failed"]
-        amount=sum(row["bytes"] for row in candidates)
-        if not mb.askyesno("Старые неудачные генерации",
-            f"Папок со статусом failed/cancelled старше 24 часов: {len(candidates)}\n"
-            f"Размер: {self.bytes_fmt(amount)}\n\n"
-            "Они не содержат готового video.mp4.\n"
-            "Удаление будет НАВСЕГДА, без возможности восстановления через Корзину.\n"
-            "Активные генерации и папки с неизвестными файлами не затрагиваются.\n\n"
-            "Продолжить?",parent=self.disk_window or self,icon="warning"):
-            return
-        confirmation=sd.askstring("Подтверждение удаления",
-               "Для удаления старых неудачных папок введи УДАЛИТЬ:",
-               parent=self.disk_window or self)
-        if confirmation!="УДАЛИТЬ":return
-        deleted=0;freed=0;skipped=0
+        plain=[];potential=[];skipped=[]
         base=self.db.get("output","")
         for row in candidates:
             try:
                 folder=Path(row["path"])
                 size=eligible_failed(folder,base)
-                shutil.rmtree(folder)
-                deleted+=1;freed+=size
-            except (OSError,ValueError):skipped+=1
-        mb.showinfo("Очистка завершена",
-            f"Удалено старых папок: {deleted}\nОсвобождено: {self.bytes_fmt(freed)}\n"
-            f"Пропущено или защищено: {skipped}",parent=self.disk_window or self)
+                evidence=recovery_evidence(folder)
+                target=(potential if evidence else plain)
+                target.append((folder,size,evidence))
+            except (OSError,ValueError) as exc:
+                skipped.append(str(exc))
+        if not plain and not potential:
+            mb.showinfo("Неудачные генерации",
+                "Не найдено папок, которые проходят проверку безопасности. "
+                "Некоторые содержат неизвестные файлы или недавно изменялись.",
+                parent=self.disk_window or self)
+            return
+        approved=[]
+        if plain:
+            space=sum(size for _,size,_ in plain)
+            if mb.askyesno("Без промежуточных данных",
+                f"Найдено {len(plain)} неудачных генераций без известных файлов восстановления.\n"
+                f"Размер: {self.bytes_fmt(space)}.\n\n"
+                "Переместить эти папки в Корзину Windows? "
+                "Восстановить их можно через Проводник, пока Корзина не очищена.",
+                icon="question",parent=self.disk_window or self):
+                approved.extend(plain)
+        if potential:
+            space=sum(size for _,size,_ in potential)
+            examples="\n".join("• "+str(folder.name)[:12]+"…: "+", ".join(files[:3])
+                       for folder,_,files in potential[:6])
+            if mb.askyesno("ВНИМАНИЕ: есть промежуточные данные",
+                f"Отдельно обнаружено {len(potential)} папок ({self.bytes_fmt(space)}) с кадрами "
+                "или промежуточными файлами.\n"
+                "FreeVideo не обязательно сможет продолжить эти генерации, "
+                "но данные могут пригодиться для повторной работы.\n\n"
+                f"{examples}\n\n"
+                "Переместить И ЭТИ папки в Корзину Windows? "
+                "Их можно восстановить, пока Корзина не очищена.",
+                icon="warning",parent=self.disk_window or self):
+                approved.extend(potential)
+        if not approved:return
+        moved=0;size_moved=0;failed=0
+        for folder,_,_ in approved:
+            try:
+                # Repeat full path, status, age and file checks immediately before mutation.
+                size=eligible_failed(folder,base)
+                send2trash(str(folder))
+                moved+=1;size_moved+=size
+            except (OSError,ValueError):failed+=1
+        mb.showinfo("Перемещено в Корзину Windows",
+            f"Папок в Корзине Windows: {moved}\n"
+            f"Их общий размер: {self.bytes_fmt(size_moved)}\n"
+            f"Пропущено/защищено: {failed+len(skipped)}\n\n"
+            "Место на диске может не освободиться, пока ты не очистишь Корзину Windows.",
+            parent=self.disk_window or self)
         self.refresh_storage_audit()
 
     def clear_preview_cache(self):
@@ -1289,7 +1321,7 @@ class App(tk.Tk):
         self.btn(bar,"Закрыть",win.destroy).pack(side="right",padx=5)
         refill()
 
-    def delete_selected(self, permanent=False):
+    def delete_selected(self):
         selected=list(self.tree.selection())
         if not selected and self.selected:selected=[self.selected]
         if not selected:return
@@ -1314,21 +1346,18 @@ class App(tk.Tk):
               "Удаляются целые папки генераций, включая MP4, превью и метаданные.\n"
               "Исходные файлы FreeVideo других генераций не изменятся.")
         if errors:head+=f"\nПропущено защищённых или неподходящих: {len(errors)}."
-        if permanent:
-            head+="\n\nВНИМАНИЕ: восстановление через Корзину будет невозможно."
-            if not mb.askyesno("Безвозвратное удаление",head,parent=self,icon="warning"):return
-            typed=sd.askstring("Подтверждение",f"Для безвозвратного удаления {folders} папок введи слово УДАЛИТЬ:",parent=self)
-            if typed!="УДАЛИТЬ":return
-        elif not mb.askyesno("Переместить в Корзину",head+"\n\nПереместить в Корзину Windows?",
-                              parent=self,icon="warning"):return
+        if not mb.askyesno("Переместить в Корзину Windows",
+            head+"\n\nВсе выбранные папки попадут в Корзину Windows. "
+            "Место на диске освободится после её очистки.",
+            parent=self,icon="warning"):
+            return
         ok=0;failed=[]
         for key,folder,_ in records:
             try:
                 # Revalidate immediately before writing to reduce accidental deletions.
                 check,_=validate_deletion_folder(self.db["items"][key],self.db.get("output",""))
                 if check!=folder:raise ValueError("Путь изменился")
-                if permanent:shutil.rmtree(folder)
-                else:send2trash(str(folder))
+                send2trash(str(folder))
                 # Keep notes for potential recovery after restoring from Recycle Bin.
                 self.db.setdefault("deletedHistory",{})[key]=self.db["items"][key]
                 del self.db["items"][key]
@@ -1342,7 +1371,7 @@ class App(tk.Tk):
             self.show_lora_details({})
             self.show_gallery()
         self.persist();self.fill()
-        result=f"Удалено папок: {ok}/{folders}. Выбранный объём: {capacity}."
+        result=f"Перемещено в Корзину Windows: {ok}/{folders}. Объём: {capacity}."
         if failed:result+="\nНе удалось:\n"+"\n".join(failed[:8])
         mb.showinfo("Удаление завершено",result)
         self.status.config(text=result.split("\n")[0])
