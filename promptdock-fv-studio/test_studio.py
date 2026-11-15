@@ -52,6 +52,48 @@ class FreeVideoSafetyTests(unittest.TestCase):
             info=inspect(str(base))
             self.assertEqual(info["working_estimate"],1024)
 
+    def test_originals_link_only_to_explicit_saved_assets(self):
+        from reference_links import linked_originals
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)/"ComfyUI"
+            output=root/"output"/"FreeVideo"
+            output.mkdir(parents=True)
+            source=root/"input"/"freevideo"/("a"*32)/"original_photo.jpg"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"JPG")
+            assets=[{"file":f"freevideo/{'a'*32}/original_photo.jpg","role":"first"}]
+            request={"assets":json.dumps(assets)}
+            linked=linked_originals(output,request)
+            self.assertEqual(len(linked),1)
+            self.assertEqual(linked[0]["path"],str(source))
+            self.assertTrue(linked[0]["exists"])
+            self.assertEqual(linked[0]["role"],"first")
+            self.assertFalse((root/"output"/"FreeVideo"/"original_photo.jpg").exists())
+            self.assertEqual(linked_originals(output,{"prompt":"original_photo.jpg"}),[])
+            source.unlink()
+            missing=linked_originals(output,request)
+            self.assertEqual(len(missing),1)
+            self.assertFalse(missing[0]["exists"])
+            self.assertEqual(linked_originals(output,
+                {"assets":[{"file":"../../other.jpg","role":"first"}]}),[])
+
+    def test_failed_intermediate_markers_are_reported(self):
+        from cleanup import recovery_evidence
+        with tempfile.TemporaryDirectory() as directory:
+            run=Path(directory)
+            self.assertEqual(recovery_evidence(run),[])
+            (run/"first.png").write_bytes(b"frame")
+            (run/"video.artifacts").mkdir()
+            (run/"video.artifacts"/"latents.pt").write_bytes(b"latents")
+            indicators=recovery_evidence(run)
+            self.assertIn("first.png",indicators)
+            self.assertIn("video.artifacts/latents.pt",indicators)
+            self.assertTrue((run/"first.png").is_file())
+
+    def test_own_player_class_can_be_imported_without_automatic_launch(self):
+        from studio_player import VideoPlayer
+        self.assertEqual(VideoPlayer._format_time(125),"02:05")
+
     def test_saved_reference_images_preserved_and_detected(self):
         from studio import run_reference_images,pics
         with tempfile.TemporaryDirectory() as directory:
