@@ -100,6 +100,8 @@ class App(tk.Tk):
         self.protocol("WM_DELETE_WINDOW",self.quit_app)
         self.bind("<Control-s>",lambda e:self.save())
         if self.db.get("output"):self.after(400,self.scan)
+        # Read-only background refresh: discover new FreeVideo outputs without a daemon.
+        self.after(120000,self.auto_scan)
 
     def btn(self,parent,label,cmd,primary=False):
         return tk.Button(parent,text=label,command=cmd,bg="#4474c2" if primary else "#293d55",
@@ -249,6 +251,12 @@ class App(tk.Tk):
         self.db["items"][key]=it;self.persist();self.group="Все";self.fill()
         self.selected=None;self.tree.selection_set(key);self.choose_item(None)
 
+    def auto_scan(self):
+        if self.db.get("output"):
+            try: self.scan()
+            except (OSError,ValueError): pass
+        if self.winfo_exists():self.after(120000,self.auto_scan)
+
     def pick_output(self):
         path=fd.askdirectory(title="Выбери output или output/FreeVideo",initialdir=self.db.get("output") or str(Path.home()))
         if path:self.db["output"]=path;self.persist();self.scan()
@@ -377,7 +385,8 @@ class App(tk.Tk):
     def import_json(self):
         name=fd.askopenfilename(title="Открыть JSON PromptDock",filetypes=[("JSON","*.json")])
         if not name:return
-        rows=load_json(name,50_000_000).get("prompts")
+        archive=load_json(name,50_000_000)
+        rows=archive.get("prompts")
         if not isinstance(rows,list):mb.showerror("Ошибка","Не найден массив prompts");return
         added=0
         for row in rows:
@@ -390,8 +399,38 @@ class App(tk.Tk):
                 favorite=bool(row.get("favorite")),source="PromptDock",images=[],
                 createdAt=int(row.get("createdAt") or time.time()*1000))
             added+=1
+        # Import Gallery extension payloads (if present), matching original PromptDock IDs.
+        # Never execute or follow paths from a JSON archive. Each image is decoded
+        # only from verified inline data, and stored under this app's local directory.
+        image_count=0
+        images=archive.get("galleryImages",[])
+        if isinstance(images,list):
+            for image in images[:2000]:
+                if not isinstance(image,dict):continue
+                key="dock:"+str(image.get("promptId",""))
+                if key not in self.db["items"]:continue
+                collection=self.db["items"][key].setdefault("images",[])
+                if len(collection)>=39:continue
+                url=image.get("dataUrl","")
+                if not isinstance(url,str) or len(url)>12_000_000 or not url.startswith("data:image/") or ";base64," not in url:continue
+                header,_,raw=url.partition(",")
+                mime=header[5:-7]
+                suffix={"image/jpeg":".jpg","image/png":".png","image/webp":".webp","image/gif":".gif"}.get(mime)
+                if suffix is None:continue
+                try:
+                    data=base64.b64decode(raw,validate=True)
+                    if not 0<len(data)<=8*1024*1024:continue
+                    directory=PHOTOS/str(uuid.uuid5(uuid.NAMESPACE_URL,key))
+                    directory.mkdir(parents=True,exist_ok=True)
+                    dest=directory/(uuid.uuid4().hex+suffix)
+                    dest.write_bytes(data)
+                    with Image.open(dest) as check:check.verify()
+                    collection.append(str(dest));image_count+=1
+                except (OSError,ValueError,base64.binascii.Error):
+                    try:dest.unlink(missing_ok=True)
+                    except (OSError,UnboundLocalError):pass
         self.persist();self.group="Все";self.fill()
-        self.status.config(text=f"Импортировано из PromptDock: {added}")
+        self.status.config(text=f"Импортировано из PromptDock: {added}, изображений: {image_count}")
 
     def export_json(self):
         if self.selected:self.save(False)
