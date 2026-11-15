@@ -2,7 +2,7 @@
 Independent companion application; export/import PromptDock JSON v1 (+ galleryImages extension).
 GPL-3.0-or-later.
 """
-import base64, json, os, shutil, time, uuid, mimetypes, subprocess
+import base64, json, os, shutil, time, uuid, mimetypes, subprocess, re, stat, math
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog as fd, messagebox as mb, simpledialog as sd
@@ -27,26 +27,98 @@ def save_db(value,path=DB):
     temp.write_text(json.dumps(value,ensure_ascii=False,indent=2),encoding="utf-8")
     temp.replace(path)
 
-def get_loras(obj):
-    """Return only explicit LoRA values in workflow/receipt; no model guesswork."""
-    out=[]
-    def walk(v,key="",depth=0):
-        if depth>9 or len(out)>=64:return
-        if isinstance(v,dict):
-            for name,value in v.items():
-                k=str(name).lower()
-                if "lora" in k and isinstance(value,str):
-                    if value.strip().startswith("["):
-                        try: walk(json.loads(value),k,depth+1);continue
-                        except ValueError: pass
-                    if value.strip():out.append(value.strip())
-                elif k in ("name","path") and ("lora" in key or "adapter" in key) and isinstance(value,str):
-                    if value.strip():out.append(value.strip())
-                elif isinstance(value,(dict,list)):walk(value,k,depth+1)
-        elif isinstance(v,list):
-            for item in v[:36]:walk(item,key,depth+1)
-    walk(obj)
-    return list(dict.fromkeys(out))[:32]
+def _parse_lora_payload(value):
+    """FreeVideo LoRA Stack saves adapters as a JSON *string* inside workflow widgets."""
+    if isinstance(value, str) and value.strip().startswith(("[", "{")):
+        try: return json.loads(value)
+        except (ValueError, TypeError): return value
+    return value
+
+def _lora_name(value):
+    if not isinstance(value, str) or not value.strip() or value in ("None", "null"):
+        return ""
+    # Full filesystem path from media.json; show only the filename, never an opaque path.
+    return value.strip().replace("\\", "/").split("/")[-1]
+
+def extract_loras(document, source):
+    """Return actual or configured LoRAs in encounter order, with per-item strength.
+    media.json is authoritative for *used* adapters; workflow is a saved configuration.
+    """
+    result = []
+    def add(name, strength=None, enabled=True, alpha=None):
+        name = _lora_name(name)
+        if not name or not name.lower().endswith(".safetensors") or enabled is False:
+            return
+        if strength is not None and (type(strength) not in (int, float) or not math.isfinite(strength)):
+            strength = None
+        if strength == 0:
+            return
+        if alpha is not None and (type(alpha) not in (int, float) or not math.isfinite(alpha)):
+            alpha = None
+        result.append(dict(name=name, strength=strength, alpha=alpha, source=source))
+    def walk(value, context="", depth=0):
+        if depth > 16 or len(result) >= 64:
+            return
+        value = _parse_lora_payload(value)
+        if isinstance(value, list):
+            for row in value[:64]: walk(row, context, depth + 1)
+        elif isinstance(value, dict):
+            # Actual video request: media.json → loras → [{path, strength, alpha}, ...].
+            if ("lora" in context or "adapter" in context) and ("path" in value or "name" in value):
+                add(value.get("path") or value.get("name"), value.get("strength"),
+                    value.get("enabled", True), value.get("alpha"))
+                return
+            cls = str(value.get("class_type") or value.get("type") or "").lower()
+            if cls.endswith("freevideolora") and not cls.endswith("stack"):
+                inputs = value.get("inputs") or {}
+                if isinstance(inputs, dict):
+                    add(inputs.get("lora"), inputs.get("strength", 1))
+                widgets = value.get("widgets_values")
+                if isinstance(widgets, list) and widgets:
+                    add(widgets[0], widgets[1] if len(widgets)>1 else 1)
+            if cls.endswith("freevideolorastack"):
+                inputs = value.get("inputs") or {}
+                if isinstance(inputs, dict): walk(inputs.get("adapters"), "adapters", depth+1)
+                widgets = value.get("widgets_values")
+                if isinstance(widgets, list):
+                    for row in widgets: walk(row, "adapters", depth+1)
+                elif isinstance(widgets, dict): walk(widgets.get("adapters"), "adapters", depth+1)
+            for key, val in value.items():
+                field = str(key).lower()
+                if field in ("loras", "adapters", "lora_stack", "lora_list", "lora_models"):
+                    walk(val, field, depth+1)
+                elif isinstance(val, (dict, list)):
+                    walk(val, field if ("lora" in field or "adapter" in field) else "", depth+1)
+                elif field in ("loras", "adapters") and isinstance(val, str):
+                    walk(val, field, depth+1)
+                elif field in ("lora", "lora_name") and isinstance(val, str):
+                    add(val, value.get("strength"), value.get("enabled", True))
+    walk(document)
+    unique=[];seen=set()
+    for row in result:
+        # Preserve distinct stacked entries with same name but different strength.
+        signature=(row["name"].casefold(),row.get("strength"))
+        if signature not in seen:
+            seen.add(signature);unique.append(row)
+    return unique[:32]
+
+def read_lora_details(home, request, workflow):
+    # FreeVideo writes the ACTUAL applied list, including strength, into media.json.
+    # The workflow (including disabled LoRAs) describes configuration, not execution.
+    media = load_json(home / "media.json", 4_000_000)
+    applied = extract_loras(media, "Применена") if media else []
+    configured = extract_loras(workflow, "В настройках") if workflow else []
+    if applied:
+        # Preserve workflow-only selections, but don't claim those were applied.
+        signatures={row["name"].casefold() for row in applied}
+        return applied + [row for row in configured if row["name"].casefold() not in signatures]
+    if configured: return configured
+    # Legacy files sometimes only keep a request in another JSON sidecar.
+    for source in (request, load_json(home / "video.request.json", 4_000_000)):
+        records=extract_loras(source, "В сохранённых данных")
+        if records:return records
+    return []
+
 
 def from_freevideo(folder):
     root=Path(folder).expanduser()
@@ -62,13 +134,14 @@ def from_freevideo(folder):
             p=home/"prompt.txt"
             prompt=p.read_text(encoding="utf-8-sig")[:80000] if p.is_file() and not p.is_symlink() else ""
             wf=load_json(home/"workflow.json")
+            lora_details=read_lora_details(home,req,wf)
             preview=next((str(home/n) for n in ("video.thumbnail.jpg","frame-preview.jpg","first.png") if (home/n).is_file()),"")
             rows.append(dict(id="fv:"+home.relative_to(root).as_posix(),source="FreeVideo",
                 title=(prompt.strip().splitlines()[0][:95] if prompt.strip() else home.name[:16]),
                 prompt=prompt,video=str(video),preview=preview,
                 seed=req.get("seed") if type(req.get("seed")) is int else None,
                 geometry=req.get("geometry") if isinstance(req.get("geometry"),dict) else {},
-                loras=get_loras(wf) or get_loras(req),
+                loras=[r["name"] for r in lora_details],loraDetails=lora_details,
                 createdAt=int(video.stat().st_mtime*1000)))
         except (OSError,ValueError,UnicodeError,IndexError):continue
     return sorted(rows,key=lambda r:r["createdAt"],reverse=True)
@@ -269,7 +342,7 @@ class App(tk.Tk):
             key=item["id"]
             if key in self.db["items"]:
                 it=self.db["items"][key]
-                it.update({name:item[name] for name in ("video","preview","seed","geometry","loras")})
+                it.update({name:item[name] for name in ("video","preview","seed","geometry","loras","loraDetails")})
                 if not it.get("prompt"):it["prompt"]=item["prompt"]
             else:
                 item.update(category="FreeVideo",tags="",favorite=False,images=[])
