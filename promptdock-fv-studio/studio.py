@@ -8,6 +8,8 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog as fd, messagebox as mb, simpledialog as sd
 from PIL import Image, ImageTk
+from bridge_payloads import BRIDGE_INIT, BRIDGE_JS
+from bridge_discovery import discover_custom_nodes, normalize_custom_nodes
 from ui_widgets import PillButton
 from cleanup import inspect as inspect_storage, api_query, eligible_failed, root_dir
 from bridge_embedded import BRIDGE_PY, BRIDGE_JS
@@ -545,168 +547,152 @@ class App(tk.Tk):
         p=Path(raw)
         return p if (p/"__init__.py").is_file() and (p/"web"/"bridge.js").is_file() else None
 
+    def _choose_comfyui_nodes(self):
+        """Prefer an automatically discovered install; still allow manual override."""
+        hints = [self.db.get("customNodes"), self.db.get("bridgePath"),
+                 self.db.get("output"), Path(sys.executable).parent, Path.home()]
+        detected = discover_custom_nodes(hints)
+        if len(detected) == 1:
+            return detected[0]
+        if len(detected) > 1:
+            answer = {"path": None, "manual": False}
+            dialog = tk.Toplevel(self)
+            dialog.title("Найденные установки FreeVideo")
+            dialog.geometry("690x370")
+            dialog.minsize(550, 290)
+            dialog.configure(bg="#122035")
+            dialog.transient(self)
+            dialog.grab_set()
+            tk.Label(dialog, text="ГДЕ ПОДКЛЮЧИТЬ FREEVIDEO?", bg="#122035",
+                     fg="#edf4ff", font=("Segoe UI", 14, "bold"),
+                     pady=14).pack(fill="x")
+            tk.Label(dialog, text="Найдены папки ComfyUI. Выбери нужную установку:",
+                     bg="#122035", fg="#a5c4e5", pady=4).pack(fill="x")
+            picker = tk.Listbox(dialog, bg="#192c43", fg="#e6f2ff",
+                selectbackground="#5266ad", highlightthickness=0,
+                font=("Segoe UI", 10), selectmode="single", relief="flat")
+            picker.pack(fill="both", expand=True, padx=18, pady=10)
+            for item in detected[:25]:
+                picker.insert("end", str(item))
+            picker.selection_set(0)
+            footer = tk.Frame(dialog, bg="#122035", pady=10)
+            footer.pack(fill="x", padx=14)
+            def accept():
+                selected = picker.curselection()
+                if selected:
+                    answer["path"] = detected[selected[0]]
+                    dialog.destroy()
+            def manual():
+                answer["manual"] = True
+                dialog.destroy()
+            self.btn(footer, "Подключить выбранную", accept, True).pack(side="left", padx=3)
+            self.btn(footer, "Выбрать вручную", manual).pack(side="left", padx=3)
+            self.btn(footer, "Отмена", dialog.destroy).pack(side="right", padx=3)
+            picker.bind("<Double-1>", lambda event: accept())
+            self.wait_window(dialog)
+            if answer["path"]:
+                return answer["path"]
+            if not answer["manual"]:
+                return None
+
+        # FreeVideo root, ComfyUI root, its output folder and custom_nodes are accepted.
+        initial = self.db.get("customNodes") or self.db.get("output") or str(Path.home())
+        if not Path(initial).is_dir():
+            initial = str(Path.home())
+        chosen = fd.askdirectory(
+            title="Выбери папку FreeVideo, ComfyUI или custom_nodes",
+            initialdir=initial, parent=self)
+        if not chosen:
+            return None
+        node_dir = normalize_custom_nodes(chosen)
+        if not node_dir:
+            mb.showerror("ComfyUI не найден",
+                "В выбранном месте не найдена папка custom_nodes.\n\n"
+                "Выбери каталог установки FreeVideo, папку ComfyUI "
+                "или непосредственно ComfyUI\\custom_nodes.\n"
+                "Никакие файлы не изменены.", parent=self)
+        return node_dir
+
     def install_bridge(self):
-        """Find ComfyUI and install an opt-in extension with code embedded in EXE.
-
-        The v3 package-file lookup was fragile on some PyInstaller installs;
-        embedding both sources in the Python bundle makes their availability
-        independent of the extracted temp directory.
-        """
-        if self.bridge_scanning:
-            mb.showinfo("Подключение","Поиск FreeVideo уже выполняется.",parent=self)
+        self.status.config(text="⌕ Ищу установленный FreeVideo / ComfyUI…")
+        self.update_idletasks()
+        node_dir = self._choose_comfyui_nodes()
+        if node_dir is None:
+            self.status.config(text="Подключение FreeVideo отменено или папка не найдена.")
             return
-        if not mb.askyesno("Подключить FreeVideo",
-            "Найти установленный ComfyUI / FreeVideo на компьютере?\n\n"
-            "Программа покажет найденные папки. После выбора и подтверждения "
-            "добавит маленькое дополнение в custom_nodes.\n\n"
-            "Мост принимает только выбранные промпты и настройки, "
-            "НЕ запускает генерацию, НЕ удаляет видео и не требует прежнего агента.\n"
-            "Для первого подключения понадобится перезапустить FreeVideo.",
-            parent=self,icon="question"):
+        node_dir = Path(node_dir)
+        if node_dir.name.casefold() != "custom_nodes" or not node_dir.is_dir():
+            mb.showerror("Ошибка", "Требуется папка ComfyUI/custom_nodes.", parent=self)
             return
-        self.bridge_scanning=True
-        self.status.config(text="⇄ Ищу FreeVideo / ComfyUI на локальных дисках…")
-        def worker():
-            try:
-                paths=discover_comfyui(output=self.db.get("output",""),
-                                       saved=self.db.get("customNodes",""),
-                                       limit_seconds=10)
-                error=""
-            except (OSError,ValueError) as exc:
-                paths=[];error=str(exc)
-            def ready():
-                self.bridge_scanning=False
-                if error:
-                    self.status.config(text="Не удалось автоматически обнаружить FreeVideo.")
-                else:
-                    self.status.config(text=f"⇄ Найдено папок custom_nodes: {len(paths)}")
-                self.choose_install_location(paths)
-            try:self.after(0,ready)
-            except (RuntimeError,tk.TclError):pass
-        threading.Thread(target=worker,name="promptdock-find-freevideo",daemon=True).start()
-
-    def choose_install_location(self,locations):
-        """Explicit choice: never install into an arbitrary path silently."""
-        win=tk.Toplevel(self)
-        win.title("Подключение к FreeVideo")
-        win.geometry("780x420")
-        win.minsize(620,340)
-        win.configure(bg="#101A2C")
-        win.transient(self)
-        tk.Label(win,text="⇄  ПОДКЛЮЧЕНИЕ К FREEVIDEO",bg="#101A2C",fg="#F3EEFF",
-                 font=("Segoe UI",16,"bold"),pady=17).pack(fill="x")
-        text=("Найденные папки ComfyUI / custom_nodes. Выбери свою установку:"
-              if locations else
-              "Автопоиск не нашёл ComfyUI. Можно указать папку FreeVideo или ComfyUI вручную.")
-        tk.Label(win,text=text,bg="#101A2C",fg="#A9C4E6",
-                 font=("Segoe UI",10),wraplength=700).pack(fill="x",padx=14,pady=8)
-        listing=tk.Listbox(win,bg="#1B2B42",fg="#E9F2FF",selectbackground="#6659BA",
-                 highlightthickness=0,relief="flat",font=("Segoe UI",10),
-                 activestyle="none",height=9)
-        listing.pack(fill="both",expand=True,padx=18,pady=8)
-        for location in locations:listing.insert("end",location)
-        if locations:listing.selection_set(0)
-        footer=tk.Frame(win,bg="#101A2C",pady=12)
-        footer.pack(fill="x",padx=18)
-        def chosen():
-            selection=listing.curselection()
-            if not selection:
-                mb.showinfo("Выбор","Выбери одну установку FreeVideo.",parent=win)
-                return
-            folder=listing.get(selection[0])
-            if not mb.askyesno("Подтвердить установку",
-                f"Установить мост в папку:\n\n{folder}\n\n"
-                "Будут созданы только файлы нашего дополнения "
-                "promptdock_freevideo_bridge. Другие компоненты FreeVideo не изменятся.",
-                parent=win,icon="question"):
-                return
-            if self._install_bridge_to(Path(folder),parent=win):
-                win.destroy()
-        def manual():
-            initial=self.db.get("customNodes") or self.db.get("output") or str(Path.home())
-            location=fd.askdirectory(title="Укажи папку FreeVideo, ComfyUI или custom_nodes",
-                                     initialdir=initial,parent=win)
-            if not location:return
-            matches=resolve_custom_nodes(location)
-            if not matches:
-                mb.showwarning("Папка не распознана",
-                    "В выбранной папке не удалось найти custom_nodes.\n"
-                    "Можно выбрать саму папку custom_nodes либо папку ComfyUI.\n"
-                    "Ничего не установлено.",parent=win)
-                return
-            for match in matches:
-                name=str(match)
-                if name not in locations:
-                    locations.append(name);listing.insert("end",name)
-            listing.selection_clear(0,"end")
-            listing.selection_set(locations.index(str(matches[0])))
-            listing.see(locations.index(str(matches[0])))
-        self.btn(footer,"◈  Подключить выбранное",chosen,True).pack(side="left",padx=5)
-        self.btn(footer,"Указать папку вручную",manual).pack(side="left",padx=5)
-        self.btn(footer,"Отмена",win.destroy).pack(side="right",padx=5)
-        listing.bind("<Double-Button-1>",lambda _:chosen())
-
-    def _install_bridge_to(self,node_dir,parent=None):
-        parent=parent or self
-        node_dir=Path(node_dir)
-        if node_dir.name.casefold()!="custom_nodes" or not node_dir.is_dir() or _is_reparse(node_dir):
-            mb.showerror("Ошибка","Это не обычная папка ComfyUI/custom_nodes.",parent=parent)
-            return False
-        if not BRIDGE_PY.startswith('"""PromptDock one-way local handoff') or (
-                "PromptDock.FreeVideoBridge" not in BRIDGE_JS):
-            mb.showerror("Ошибка сборки",
-                "В программе отсутствует встроенный код моста. Установка отменена.",
-                parent=parent)
-            return False
-        target=node_dir/BRIDGE_NAME
+        if _is_reparse(node_dir):
+            mb.showerror("Установка", "Нельзя устанавливать мост в ссылку или точку подключения.", parent=self)
+            return
+        target = node_dir / BRIDGE_NAME
         if target.exists():
-            if not target.is_dir() or _is_reparse(target):
-                mb.showerror("Ошибка","Папка моста является ссылкой или файлом.",parent=parent)
-                return False
-            current=target/"__init__.py"
-            if not current.is_file() or _is_reparse(current) or (
-                    "PromptDock one-way local handoff" not in
-                    current.read_text(encoding="utf-8",errors="replace")):
-                mb.showerror("Занято",
-                    "Папка дополнения уже занята другими файлами. Ничего не перезаписано.",
-                    parent=parent)
-                return False
+            try:
+                owned = (target.is_dir() and not _is_reparse(target) and
+                    "PromptDock one-way local handoff" in
+                    (target/"__init__.py").read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                owned = False
+            if not owned:
+                mb.showerror("Папка занята",
+                    "В этом месте уже находится другое дополнение. Оно не будет перезаписано.",
+                    parent=self)
+                return
+        other = node_dir / "FreeVideo"
+        notice = "" if other.is_dir() else (
+            "\n\nВ выбранном custom_nodes не найден каталог FreeVideo. "
+            "Убедись, что это именно та установка ComfyUI, которую запускает FreeVideo.")
+        if not mb.askyesno("Подключить FreeVideo",
+            "Установить / обновить локальный мост?\n\n"
+            + str(target)
+            + "\n\nМост передаёт только выбранные настройки текущему графу. "
+              "Генерация не запускается."
+            + notice + "\n\nПосле установки перезапусти FreeVideo.", parent=self):
+            return
+        # The bridge is embedded in the EXE as Python literals. This fixes the
+        # old 'files missing from build' error even if --add-data was misplaced.
+        outputs = [(target/"__init__.py", BRIDGE_INIT),
+                   (target/"web"/"bridge.js", BRIDGE_JS)]
+        originals = {}
+        written = []
         try:
-            (target/"web").mkdir(parents=True,exist_ok=True)
-            if _is_reparse(target/"web"):
-                raise ValueError("Папка web является точкой подключения")
+            for dest, _ in outputs:
+                originals[dest] = dest.read_bytes() if dest.exists() else None
+            (target/"web").mkdir(parents=True, exist_ok=True)
+            for dest, contents in outputs:
+                tmp = dest.with_name(dest.name + ".promptdock-new")
+                try:
+                    tmp.write_text(contents, encoding="utf-8")
+                    tmp.replace(dest)
+                    written.append(dest)
+                finally:
+                    tmp.unlink(missing_ok=True)
             (target/"queue").mkdir(exist_ok=True)
-            if _is_reparse(target/"queue"):
-                raise ValueError("Папка queue является точкой подключения")
-            # Atomic replace: no half-written JS if the app is closed mid-copy.
-            for path,content in ((target/"__init__.py",BRIDGE_PY),
-                                 (target/"web"/"bridge.js",BRIDGE_JS)):
-                if path.exists() and _is_reparse(path):
-                    raise ValueError("Файл дополнения является ссылкой")
-                temp=path.with_name(path.name+".staging")
-                temp.write_text(content,encoding="utf-8")
-                temp.replace(path)
-            # Verify the actual files, not only the payload in the running EXE.
-            if (target/"__init__.py").read_text(encoding="utf-8")!=BRIDGE_PY or (
-                    (target/"web"/"bridge.js").read_text(encoding="utf-8")!=BRIDGE_JS):
-                raise OSError("Скопированные файлы не прошли проверку")
-            self.db["customNodes"]=str(node_dir)
-            self.db["bridgePath"]=str(target)
+            self.db["customNodes"] = str(node_dir)
+            self.db["bridgePath"] = str(target)
             self.persist()
-            self.status.config(text="✓ Мост FreeVideo установлен. Перезапусти ComfyUI / FreeVideo.")
+            self.status.config(text="✓ Мост установлен в " + str(target))
             mb.showinfo("FreeVideo подключён",
-                "Мост успешно записан и проверен.\n\n"
-                "1. Перезапусти FreeVideo / ComfyUI.\n"
-                "2. Открой интерфейс генерации FreeVideo.\n"
+                "Мост установлен.\n\n1. Перезапусти FreeVideo / ComfyUI.\n"
+                "2. Открой рабочий граф FreeVideo в режиме узлов.\n"
                 "3. Выбери промпт и нажми «Применить в FreeVideo».\n\n"
-                "Генерация автоматически не запускается.",
-                parent=parent)
-            return True
-        except (OSError,UnicodeError,ValueError) as exc:
-            mb.showerror("Не удалось подключить FreeVideo",
-                         str(exc)+"\n\nМодели и исходники FreeVideo не изменены.",
-                         parent=parent)
-            return False
+                "Изменятся только выбранные параметры. Генерация не стартует.",
+                parent=self)
+        except (OSError, ValueError) as error:
+            for dest in written:
+                try:
+                    if originals[dest] is None:
+                        dest.unlink(missing_ok=True)
+                    else:
+                        restore = dest.with_name(dest.name + ".promptdock-restore")
+                        restore.write_bytes(originals[dest])
+                        restore.replace(dest)
+                except OSError:
+                    pass
+            mb.showerror("Не удалось подключить", str(error), parent=self)
+            self.status.config(text="Подключение не выполнено: " + str(error))
 
     def apply_to_freevideo(self):
         if not self.selected or self.selected not in self.db["items"]:
