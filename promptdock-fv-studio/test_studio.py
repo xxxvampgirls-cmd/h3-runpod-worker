@@ -8,6 +8,8 @@ from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from studio import extract_loras, read_lora_details, from_freevideo, validate_deletion_folder
 from cleanup import inspect, eligible_failed
+from bridge_discovery import normalize_custom_nodes, discover_custom_nodes
+from bridge_payloads import BRIDGE_INIT, BRIDGE_JS
 
 class FreeVideoSafetyTests(unittest.TestCase):
     def test_embedded_bridge_payload(self):
@@ -146,6 +148,40 @@ class FreeVideoSafetyTests(unittest.TestCase):
             for p in [record,user_note]:os.utime(p,(before,before))
             with self.assertRaises(ValueError):eligible_failed(fail,root)
             self.assertTrue(user_note.exists())
+
+
+    def test_embedded_bridge_resources_match_sources(self):
+        here = Path(__file__).resolve().parent / "bridge"
+        self.assertIn("PromptDock one-way local handoff", BRIDGE_INIT)
+        self.assertIn("PromptDock.FreeVideoBridge", BRIDGE_JS)
+        self.assertEqual(BRIDGE_INIT, (here/"__init__.py").read_text(encoding="utf-8"))
+        self.assertEqual(BRIDGE_JS, (here/"web"/"bridge.js").read_text(encoding="utf-8"))
+
+    def test_discover_freevideo_and_manual_folder(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            installed = root/"FreeVideo-engine"/"ComfyUI"/"custom_nodes"
+            (installed/"FreeVideo").mkdir(parents=True)
+            (root/"my_models").mkdir()
+            choices = discover_custom_nodes(scan_roots=[root])
+            self.assertIn(installed, choices)
+            self.assertEqual(choices[0], installed)
+            self.assertEqual(normalize_custom_nodes(root/"FreeVideo-engine"), installed)
+            self.assertEqual(normalize_custom_nodes(root/"FreeVideo-engine"/"ComfyUI"), installed)
+            self.assertEqual(normalize_custom_nodes(installed), installed)
+            self.assertIsNone(normalize_custom_nodes(root/"my_models"))
+
+    def test_discovery_does_not_follow_linked_install(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            actual = root/"actual"/"custom_nodes"
+            actual.mkdir(parents=True)
+            linked = root/"FreeVideo-engine"
+            try:
+                linked.symlink_to(root/"actual", target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("Directory symlinks are unavailable on this platform")
+            self.assertNotIn(linked/"custom_nodes", discover_custom_nodes(scan_roots=[root]))
 
 if __name__=="__main__":
     unittest.main()
