@@ -23,6 +23,8 @@ jobs:
         run: python -m py_compile promptdock-fv-studio/studio.py
       - name: Test FreeVideo LoRA scanning and safe folder selection
         run: python promptdock-fv-studio/test_studio.py -v
+      - name: Validate actual Windows GUI startup
+        run: python promptdock-fv-studio/studio.py --smoke-ui
       - name: Check FreeVideo browser bridge syntax
         run: node --check promptdock-fv-studio/bridge/web/bridge.js
       - name: Build standalone EXE
