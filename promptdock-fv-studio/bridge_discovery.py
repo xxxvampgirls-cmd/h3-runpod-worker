@@ -21,6 +21,20 @@ def _ordinary_directory(path):
         return False
 
 
+def _safe_directory_chain(path):
+    """Do not accept a real custom_nodes reached through a linked ancestor.
+
+    Windows junctions/NTFS reparse points may live *above* custom_nodes,
+    while custom_nodes itself looks like a plain directory.
+    """
+    p=Path(path)
+    for part in (p,*p.parents):
+        if not _ordinary_directory(part):
+            return False
+    return True
+
+
+
 def _direct_candidates(path):
     """A selected folder can be custom_nodes, ComfyUI, its parent or an output folder."""
     try:
@@ -53,7 +67,7 @@ def normalize_custom_nodes(path):
     for parent in list(p.parents)[:5]:
         candidates.append(parent/"custom_nodes")
     for candidate in candidates:
-        if candidate.name.casefold() == TARGET_NAME and _ordinary_directory(candidate):
+        if candidate.name.casefold() == TARGET_NAME and _safe_directory_chain(candidate):
             return candidate
     return None
 
@@ -68,7 +82,7 @@ def discover_custom_nodes(hints=(), scan_roots=None):
 
     def register(path):
         for candidate in _direct_candidates(path):
-            if candidate.name.casefold() != TARGET_NAME or not _ordinary_directory(candidate):
+            if candidate.name.casefold() != TARGET_NAME or not _safe_directory_chain(candidate):
                 continue
             try:
                 key = os.path.normcase(os.path.abspath(str(candidate)))
