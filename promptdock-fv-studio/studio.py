@@ -206,12 +206,15 @@ class App(tk.Tk):
         if not isinstance(self.db["items"],dict):self.db["items"]={}
         self.selected=None;self.group="Все";self.keep=[];self.gallery=[]
         self.title("PromptDock × FreeVideo Studio  |  Windows")
-        self.geometry("1370x800");self.minsize(1060,620)
-        self.configure(bg="#121c2b")
+        self.geometry("1470x870");self.minsize(1090,710)
+        self.configure(bg="#0c121f")
         st=ttk.Style();st.theme_use("clam")
-        st.configure("Treeview",background="#1c2b40",foreground="#edf2fb",fieldbackground="#1c2b40",rowheight=30,font=("Segoe UI",10))
-        st.map("Treeview",background=[("selected","#355ca2")])
-        st.configure("Treeview.Heading",background="#30445d",foreground="white")
+        st.configure("Treeview",background="#182437",foreground="#ecf4ff",fieldbackground="#182437",rowheight=38,font=("Segoe UI",10),borderwidth=0)
+        st.map("Treeview",background=[("selected","#3d5d97")],foreground=[("selected","#ffffff")])
+        st.configure("Treeview.Heading",background="#253651",foreground="#b9d4f2",relief="flat",font=("Segoe UI",10,"bold"),padding=8)
+        st.configure("TEntry",fieldbackground="#e6f0ff",foreground="#15263a",padding=5)
+        st.configure("Treeview.Lora",rowheight=25,font=("Segoe UI",9),background="#132033",fieldbackground="#132033")
+        st.configure("Treeview.Lora.Heading",font=("Segoe UI",9,"bold"),background="#23344e",foreground="#cce5fa")
         self.build();self.fill()
         self.protocol("WM_DELETE_WINDOW",self.quit_app)
         self.bind("<Control-s>",lambda e:self.save())
@@ -220,78 +223,115 @@ class App(tk.Tk):
         self.after(120000,self.auto_scan)
 
     def btn(self,parent,label,cmd,primary=False):
-        return tk.Button(parent,text=label,command=cmd,bg="#4474c2" if primary else "#293d55",
-            fg="white",activeforeground="white",activebackground="#4267a2",relief="flat",
-            font=("Segoe UI",10),cursor="hand2",padx=9,pady=6)
+        return tk.Button(parent,text=label,command=cmd,bg="#5b85e7" if primary else "#293e5b",
+            fg="#ffffff",activeforeground="#ffffff",activebackground="#4c72b7",relief="flat",
+            font=("Segoe UI",10,"bold" if primary else "normal"),cursor="hand2",padx=11,pady=8,bd=0)
 
     def build(self):
-        top=tk.Frame(self,bg="#162235",pady=9,padx=10);top.pack(fill="x")
-        tk.Label(top,text="PROMPTDOCK  ×  FREEVIDEO",bg="#162235",fg="#a6caff",
-            font=("Segoe UI",14,"bold")).pack(side="left",padx=(0,13))
+        hero=tk.Frame(self,bg="#101a2b",pady=13,padx=18)
+        hero.pack(fill="x",padx=8,pady=(8,0))
+        tk.Label(hero,text="◈  PROMPTDOCK",bg="#101a2b",fg="#f6f9ff",font=("Segoe UI",18,"bold")).pack(side="left")
+        tk.Label(hero,text="×  FREEVIDEO  STUDIO",bg="#101a2b",fg="#76d3ff",font=("Segoe UI",15,"bold")).pack(side="left",padx=10)
+        tk.Label(hero,text="LOCAL  •  OFFLINE  •  WINDOWS",bg="#1a304b",fg="#9de8ff",
+                 font=("Segoe UI",9,"bold"),padx=12,pady=7).pack(side="right")
+        top=tk.Frame(self,bg="#121e30",pady=9,padx=12);top.pack(fill="x",padx=8)
+        self.output_hint=tk.Label(top,text="Не подключена папка output",bg="#121e30",fg="#92b2d0",
+                                  font=("Segoe UI",9),anchor="w")
+
         for name,cmd in [("📂 output",self.pick_output),("⟳ Обновить",self.scan),
             ("＋ Промпт",self.new),("⬆ Импорт JSON",self.import_json),
             ("⬇ Экспорт в PromptDock",self.export_json),("LoRA",self.lora_window)]:
             self.btn(top,name,cmd,name=="📂 output").pack(side="left",padx=3)
         self.search=tk.StringVar()
-        ttk.Entry(top,textvariable=self.search,width=23).pack(side="right",padx=5)
-        tk.Label(top,text="Поиск",bg="#162235",fg="white").pack(side="right")
+        ttk.Entry(top,textvariable=self.search,width=25).pack(side="right",padx=5)
+        tk.Label(top,text="⌕ Поиск",bg="#121e30",fg="#bad4f4",font=("Segoe UI",10)).pack(side="right")
+        self.output_hint.pack(side="bottom",fill="x",pady=(11,0))
+        if self.db.get("output"):self.output_hint.config(text="◉  Каталог: "+str(self.db["output"]))
         self.search.trace_add("write",lambda *_:self.fill())
-        panel=tk.PanedWindow(self,orient="horizontal",bg="#111c2c",sashwidth=5,bd=0)
-        panel.pack(fill="both",expand=True,padx=7,pady=7)
-        left=tk.Frame(panel,bg="#1a2a3f",width=190);panel.add(left,minsize=145)
-        tk.Label(left,text="КАТЕГОРИИ",bg="#1a2a3f",fg="#b5cbe8",pady=11).pack()
-        self.groups=tk.Listbox(left,bg="#1a2a3f",fg="#e4efff",selectbackground="#355ca2",
-            selectforeground="white",font=("Segoe UI",11),relief="flat",highlightthickness=0)
+        panel=tk.PanedWindow(self,orient="horizontal",bg="#0c121f",sashwidth=8,bd=0,relief="flat")
+        panel.pack(fill="both",expand=True,padx=9,pady=9)
+        left=tk.Frame(panel,bg="#16243a",width=205);panel.add(left,minsize=165)
+        tk.Label(left,text="  БИБЛИОТЕКА / ПАПКИ",bg="#16243a",fg="#b6cdf0",pady=14,font=("Segoe UI",10,"bold")).pack(anchor="w")
+        self.groups=tk.Listbox(left,bg="#16243a",fg="#e4efff",selectbackground="#486aae",
+            selectforeground="white",font=("Segoe UI",11),relief="flat",highlightthickness=0,activestyle="none",selectborderwidth=0)
         self.groups.pack(fill="both",expand=True,padx=5,pady=3)
         self.groups.bind("<<ListboxSelect>>",self.choose_group)
-        middle=tk.Frame(panel,bg="#19283c",width=330);panel.add(middle,minsize=220)
-        tk.Label(middle,text="ПРОМПТЫ",bg="#19283c",fg="#abc5e7",pady=10).pack()
+        middle=tk.Frame(panel,bg="#182539",width=375);panel.add(middle,minsize=245)
+        tk.Label(middle,text="  КАТАЛОГ ГЕНЕРАЦИЙ",bg="#182539",fg="#c7defa",
+            pady=14,font=("Segoe UI",10,"bold")).pack(fill="x",anchor="w")
         scroll=ttk.Scrollbar(middle)
         self.tree=ttk.Treeview(middle,columns=("src",),show="tree headings",selectmode="extended",yscrollcommand=scroll.set)
         scroll.config(command=self.tree.yview)
         self.tree.heading("#0",text="Название");self.tree.heading("src",text="Источник")
         self.tree.column("#0",width=240,minwidth=100)
         self.tree.column("src",width=95,minwidth=60,stretch=False)
-        self.tree.pack(side="left",fill="both",expand=True);scroll.pack(side="right",fill="y")
         self.tree.bind("<<TreeviewSelect>>",self.choose_item)
-        tk.Label(middle,text="Ctrl / Shift — выбор нескольких роликов",bg="#19283c",fg="#9fb6d7",font=("Segoe UI",9)).pack(fill="x",side="bottom",pady=4)
-        deletion=tk.Frame(middle,bg="#19283c")
-        deletion.pack(fill="x",side="bottom",padx=5,pady=5)
+        deletion=tk.Frame(middle,bg="#182539")
+        deletion.pack(fill="x",side="bottom",padx=6,pady=7)
+        tk.Label(middle,text="Ctrl / Shift — выбрать несколько видео",bg="#182539",fg="#8daacb",
+                 font=("Segoe UI",9)).pack(fill="x",side="bottom",pady=3)
+        self.tree.pack(side="left",fill="both",expand=True)
+        scroll.pack(side="right",fill="y")
         self.btn(deletion,"В корзину",lambda:self.delete_selected(False)).pack(side="left",fill="x",expand=True,padx=2)
         tk.Button(deletion,text="Удалить навсегда",command=lambda:self.delete_selected(True),
             bg="#723341",fg="white",activeforeground="white",activebackground="#9e394b",
             relief="flat",font=("Segoe UI",9),cursor="hand2",padx=8,pady=7).pack(side="left",fill="x",expand=True,padx=2)
-        right=tk.Frame(panel,bg="#1b293d",padx=12,pady=10);panel.add(right,minsize=450)
-        line=tk.Frame(right,bg="#1b293d");line.pack(fill="x")
+        right=tk.Frame(panel,bg="#19283c",padx=15,pady=13);panel.add(right,minsize=500)
+        tk.Label(right,text="   РЕДАКТОР ПРОМПТА",fg="#b7d3f4",bg="#19283c",
+                 font=("Segoe UI",10,"bold")).pack(fill="x",anchor="w",pady=(0,9))
+        line=tk.Frame(right,bg="#19283c");line.pack(fill="x")
         self.titlevar=tk.StringVar()
         ttk.Entry(line,textvariable=self.titlevar,font=("Segoe UI",12)).pack(side="left",fill="x",expand=True)
         self.star=self.btn(line,"☆",self.favorite);self.star.pack(side="left",padx=5)
         self.btn(line,"Сохранить",self.save,True).pack(side="left")
-        row=tk.Frame(right,bg="#1b293d",pady=8);row.pack(fill="x")
-        tk.Label(row,text="Категория",bg="#1b293d",fg="white").pack(side="left")
+        row=tk.Frame(right,bg="#19283c",pady=8);row.pack(fill="x")
+        tk.Label(row,text="Категория",bg="#19283c",fg="#c4d6f0").pack(side="left")
         self.catvar=tk.StringVar();ttk.Entry(row,textvariable=self.catvar,width=23).pack(side="left",padx=6)
-        tk.Label(row,text="Теги",bg="#1b293d",fg="white").pack(side="left")
+        tk.Label(row,text="Теги",bg="#19283c",fg="#c4d6f0").pack(side="left")
         self.tagvar=tk.StringVar();ttk.Entry(row,textvariable=self.tagvar).pack(side="left",fill="x",expand=True,padx=6)
-        tk.Label(right,text="ПРОМПТ • редактор (FreeVideo остаётся без изменений)",bg="#1b293d",fg="#aac1e2",anchor="w").pack(fill="x",pady=6)
-        self.body=tk.Text(right,wrap="word",height=12,bg="#0d1929",fg="#f1f6ff",
+        tk.Label(right,text="ТЕКСТ  •  Можно менять без изменения оригиналов FreeVideo",bg="#19283c",fg="#9cbae2",anchor="w",font=("Segoe UI",9)).pack(fill="x",pady=6)
+        self.body=tk.Text(right,wrap="word",height=10,bg="#101c2d",fg="#f1f6ff",
             insertbackground="white",relief="flat",font=("Consolas",10),padx=9,pady=9)
         self.body.pack(fill="both",expand=True)
-        controls=tk.Frame(right,bg="#1b293d",pady=8);controls.pack(fill="x")
+        controls=tk.Frame(right,bg="#19283c",pady=8);controls.pack(fill="x")
         for label,cmd in [("📋 Копировать",self.copy),("▶ Видео",self.video),
             ("📂 Папка",self.open_folder),("⧉ Дубликат",self.duplicate)]:
             self.btn(controls,label,cmd).pack(side="left",padx=3)
-        self.info=tk.Label(right,text="",bg="#1b293d",fg="#afc5e7",justify="left",anchor="w",
+        self.info=tk.Label(right,text="",bg="#19283c",fg="#afd2f5",justify="left",anchor="w",
             wraplength=620,font=("Segoe UI",10))
-        self.info.pack(fill="x",pady=2)
-        gallery=tk.Frame(right,bg="#101e30",padx=5,pady=6);gallery.pack(fill="x",pady=(9,2))
-        header=tk.Frame(gallery,bg="#101e30");header.pack(fill="x")
-        tk.Label(header,text="МИНИ-ГАЛЕРЕЯ / ПРЕВЬЮ",bg="#101e30",fg="#b8cee9").pack(side="left",padx=5)
+        self.info.pack(fill="x",pady=7)
+        lora_card=tk.Frame(right,bg="#142136",padx=8,pady=7,highlightbackground="#304660",highlightthickness=1)
+        lora_card.pack(fill="x",pady=(6,3))
+        header=tk.Frame(lora_card,bg="#142136");header.pack(fill="x",pady=(0,4))
+        tk.Label(header,text="◈  LoRA  /  ПАРАМЕТРЫ ГЕНЕРАЦИИ",bg="#142136",fg="#8bdcff",
+                 font=("Segoe UI",10,"bold")).pack(side="left")
+        self.lora_count=tk.Label(header,text="0 адаптеров",bg="#243a57",fg="#d4edff",
+                 font=("Segoe UI",9),padx=9,pady=3)
+        self.lora_count.pack(side="right")
+        self.lora_tree=ttk.Treeview(lora_card,columns=("strength","alpha","state"),
+                show="tree headings",height=5,style="Treeview.Lora",selectmode="browse")
+        self.lora_tree.heading("#0",text="Файл LoRA")
+        self.lora_tree.heading("strength",text="Strength")
+        self.lora_tree.heading("alpha",text="Alpha")
+        self.lora_tree.heading("state",text="Источник")
+        self.lora_tree.column("#0",width=300,minwidth=110)
+        self.lora_tree.column("strength",width=80,minwidth=65,stretch=False,anchor="center")
+        self.lora_tree.column("alpha",width=70,minwidth=50,stretch=False,anchor="center")
+        self.lora_tree.column("state",width=110,minwidth=90,stretch=False,anchor="center")
+        lora_scroll=ttk.Scrollbar(lora_card,command=self.lora_tree.yview)
+        self.lora_tree.configure(yscrollcommand=lora_scroll.set)
+        self.lora_tree.pack(side="left",fill="both",expand=True)
+        lora_scroll.pack(side="right",fill="y")
+
+        gallery=tk.Frame(right,bg="#121f32",padx=8,pady=8,highlightbackground="#304660",highlightthickness=1);gallery.pack(fill="x",pady=(9,2))
+        header=tk.Frame(gallery,bg="#121f32");header.pack(fill="x")
+        tk.Label(header,text="▣  МИНИ-ГАЛЕРЕЯ / ПРЕВЬЮ",bg="#121f32",fg="#a8deff",font=("Segoe UI",10,"bold")).pack(side="left",padx=5)
         self.btn(header,"＋ Фото",self.add_photo).pack(side="right",padx=3)
         self.btn(header,"Удалить своё фото",self.del_photo).pack(side="right",padx=3)
-        self.frames=tk.Frame(gallery,bg="#101e30",height=112)
+        self.frames=tk.Frame(gallery,bg="#121f32",height=112)
         self.frames.pack(fill="x",pady=4);self.frames.pack_propagate(False)
-        self.status=tk.Label(self,text="Выбери output FreeVideo — исходные файлы никогда не изменяются.",
-            bg="#111b2b",fg="#a1bfdf",anchor="w",padx=12,pady=7)
+        self.status=tk.Label(self,text="Готово к работе  •  Открой output FreeVideo — твои ролики останутся на месте.",
+            bg="#121e30",fg="#a9cfed",anchor="w",padx=16,pady=10,font=("Segoe UI",10))
         self.status.pack(fill="x")
 
     def persist(self):save_db(self.db)
@@ -303,8 +343,10 @@ class App(tk.Tk):
         try:self.groups.selection_set(groups.index(self.group))
         except ValueError:self.group="Все";self.groups.selection_set(0)
         self.tree.delete(*self.tree.get_children())
+        self.tree.tag_configure("even",background="#192a42")
+        self.tree.tag_configure("odd",background="#142236")
         q=self.search.get().strip().casefold()
-        for it in sorted(self.db["items"].values(),key=lambda a:(not a.get("favorite",False),-a.get("createdAt",0))):
+        for pos,it in enumerate(sorted(self.db["items"].values(),key=lambda a:(not a.get("favorite",False),-a.get("createdAt",0)))):
             g=self.group
             if g=="★ Избранное" and not it.get("favorite"):continue
             if g=="FreeVideo" and it.get("source")!="FreeVideo":continue
@@ -312,7 +354,7 @@ class App(tk.Tk):
             if g not in ("Все","★ Избранное","FreeVideo","Мои") and g!=it.get("category"):continue
             if q and q not in (" ".join([it.get("title",""),it.get("promptEdit",it.get("prompt","")),it.get("tags","")," ".join(it.get("loras",[]))])).casefold():continue
             name=("★ " if it.get("favorite") else "")+it.get("title","Без названия")
-            self.tree.insert("",tk.END,iid=it["id"],text=name[:80],values=(it.get("source","Мой"),))
+            self.tree.insert("",tk.END,iid=it["id"],text=name[:80],values=(it.get("source","Мой"),),tags=("odd" if pos%2 else "even",))
         if chosen and self.tree.exists(chosen):
             self.tree.selection_set(chosen);self.tree.see(chosen)
 
@@ -338,10 +380,26 @@ class App(tk.Tk):
         self.body.insert("1.0",it.get("promptEdit",it.get("prompt","")))
         self.star.config(text="★" if it.get("favorite") else "☆")
         geo=it.get("geometry") or {}
-        self.info.config(text=f"Источник: {it.get('source','Мой')}    Seed: {it.get('seed','—')}    "+
-           f"Видео: {geo.get('width','?')}×{geo.get('height','?')}  {geo.get('seconds','?')} c\n"+
-           "LoRA: "+(", ".join(it.get("loras",[])) or "в метаданных не указана"))
+        self.info.config(text=f"Источник: {it.get('source','Мой')}    ◇ Seed: {it.get('seed','—')}    "+
+           f"Видео: {geo.get('width','?')} × {geo.get('height','?')}    {geo.get('seconds','?')} сек.")
+        self.show_lora_details(it)
         self.show_gallery()
+
+    def show_lora_details(self, item):
+        self.lora_tree.delete(*self.lora_tree.get_children())
+        rows=item.get("loraDetails",[])
+        if not rows and item.get("loras"):
+            rows=[{"name":s,"strength":None,"alpha":None,"source":"Старые данные"} for s in item["loras"]]
+        self.lora_count.config(text=f"{len(rows)}  LoRA")
+        if not rows:
+            self.lora_tree.insert("",tk.END,text="В сохранённых файлах LoRA не найдены",values=("—","—","—"))
+            return
+        for row in rows:
+            def num(v):
+                if type(v) not in (int,float):return "—"
+                return f"{v:g}"
+            self.lora_tree.insert("",tk.END,text=row.get("name","—"),values=(
+                num(row.get("strength")),num(row.get("alpha")),row.get("source","—")))
 
     def save(self,redraw=True):
         if not self.selected or self.selected not in self.db["items"]:return
@@ -383,7 +441,7 @@ class App(tk.Tk):
 
     def pick_output(self):
         path=fd.askdirectory(title="Выбери output или output/FreeVideo",initialdir=self.db.get("output") or str(Path.home()))
-        if path:self.db["output"]=path;self.persist();self.scan()
+        if path:self.db["output"]=path;self.output_hint.config(text="◉  Каталог: "+path);self.persist();self.scan()
 
     def scan(self):
         folder=self.db.get("output")
@@ -401,7 +459,9 @@ class App(tk.Tk):
                 item.update(category="FreeVideo",tags="",favorite=False,images=[])
                 self.db["items"][key]=item;new+=1
         self.persist();self.fill()
-        self.status.config(text=f"Проверено {len(rows)} видео. Новых промптов: {new}. Файлы FreeVideo не изменены.")
+        if self.selected and self.selected in self.db["items"]:
+            self.show_lora_details(self.db["items"][self.selected])
+        self.status.config(text=f"◉ Проверено {len(rows)} видео  •  новых: {new}  •  оригиналы не изменены.")
 
     def copy(self):
         if not self.selected:return
@@ -472,6 +532,7 @@ class App(tk.Tk):
             self.titlevar.set("");self.catvar.set("");self.tagvar.set("")
             self.body.delete("1.0",tk.END)
             self.info.config(text="")
+            self.show_lora_details({})
             self.show_gallery()
         self.persist();self.fill()
         result=f"Удалено папок: {ok}/{folders}. Выбранный объём: {capacity}."
