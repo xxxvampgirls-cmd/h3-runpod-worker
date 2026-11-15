@@ -8,6 +8,8 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog as fd, messagebox as mb, simpledialog as sd
 from PIL import Image, ImageTk
+from ui_widgets import PillButton
+from cleanup import inspect as inspect_storage, api_query, eligible_failed, root_dir
 
 ROOT=Path(os.environ.get("LOCALAPPDATA") or Path.home())/"PromptDock-FreeVideo-Studio"
 DB=ROOT/"library.json"
@@ -238,6 +240,7 @@ class App(tk.Tk):
         self.db.setdefault("items",{})
         if not isinstance(self.db["items"],dict):self.db["items"]={}
         self.selected=None;self.group="Все";self.keep=[];self.gallery=[];self.preview_image=None;self.preview_requested=set()
+        self.disk_report=None;self.disk_scanning=False;self.disk_window=None
         self.title("PromptDock × FreeVideo Studio  |  Windows")
         self.geometry("1470x870");self.minsize(1090,710)
         self.configure(bg="#0c121f")
@@ -254,19 +257,22 @@ class App(tk.Tk):
         if self.db.get("output"):self.after(400,self.scan)
         # Read-only background refresh: discover new FreeVideo outputs without a daemon.
         self.after(120000,self.auto_scan)
+        self.after(30000,self.periodic_storage_audit)
 
-    def btn(self,parent,label,cmd,primary=False):
-        return tk.Button(parent,text=label,command=cmd,bg="#5b85e7" if primary else "#293e5b",
-            fg="#ffffff",activeforeground="#ffffff",activebackground="#4c72b7",relief="flat",
-            font=("Segoe UI",10,"bold" if primary else "normal"),cursor="hand2",padx=11,pady=8,bd=0)
+    def btn(self,parent,label,cmd,primary=False,palette=None):
+        return PillButton(parent,text=label,command=cmd,primary=primary,palette=palette)
 
     def build(self):
         hero=tk.Frame(self,bg="#101a2b",pady=13,padx=18)
         hero.pack(fill="x",padx=8,pady=(8,0))
         tk.Label(hero,text="◈  PROMPTDOCK",bg="#101a2b",fg="#f6f9ff",font=("Segoe UI",18,"bold")).pack(side="left")
         tk.Label(hero,text="×  FREEVIDEO  STUDIO",bg="#101a2b",fg="#76d3ff",font=("Segoe UI",15,"bold")).pack(side="left",padx=10)
-        tk.Label(hero,text="LOCAL  •  OFFLINE  •  WINDOWS",bg="#1a304b",fg="#9de8ff",
-                 font=("Segoe UI",9,"bold"),padx=12,pady=7).pack(side="right")
+        self.disk_hint=tk.Label(hero,text="●  DISK SCAN READY",bg="#17313C",fg="#9AF1E3",
+                 font=("Segoe UI",9,"bold"),padx=12,pady=8)
+        self.disk_hint.pack(side="right",padx=(0,8))
+        tk.Label(hero,text="LOCAL / OFFLINE",bg="#25203C",fg="#CDBEFF",
+                 font=("Segoe UI",9,"bold"),padx=12,pady=8).pack(side="right",padx=(0,9))
+        tk.Frame(self,bg="#7660E5",height=3).pack(fill="x",padx=8)
         top=tk.Frame(self,bg="#121e30",pady=9,padx=12);top.pack(fill="x",padx=8)
         self.output_hint=tk.Label(top,text="Не подключена папка output",bg="#121e30",fg="#92b2d0",
                                   font=("Segoe UI",9),anchor="w")
@@ -274,10 +280,10 @@ class App(tk.Tk):
         for name,cmd in [("📂 output",self.pick_output),("⟳ Обновить",self.scan),
             ("＋ Промпт",self.new),("⬆ Импорт JSON",self.import_json),
             ("⬇ Экспорт в PromptDock",self.export_json),("LoRA",self.lora_window),
-            ("⇄ Подключить FreeVideo",self.install_bridge)]:
+            ("⇄ Подключить FreeVideo",self.install_bridge),("Очистка",self.open_storage)]:
             self.btn(top,name,cmd,name=="📂 output").pack(side="left",padx=3)
         self.search=tk.StringVar()
-        ttk.Entry(top,textvariable=self.search,width=25).pack(side="right",padx=5)
+        ttk.Entry(top,textvariable=self.search,width=20).pack(side="right",padx=5)
         tk.Label(top,text="⌕ Поиск",bg="#121e30",fg="#bad4f4",font=("Segoe UI",10)).pack(side="right")
         self.output_hint.pack(side="bottom",fill="x",pady=(11,0))
         if self.db.get("output"):self.output_hint.config(text="◉  Каталог: "+str(self.db["output"]))
@@ -290,6 +296,8 @@ class App(tk.Tk):
             selectforeground="white",font=("Segoe UI",11),relief="flat",highlightthickness=0,activestyle="none",selectborderwidth=0)
         self.groups.pack(fill="both",expand=True,padx=5,pady=3)
         self.groups.bind("<<ListboxSelect>>",self.choose_group)
+        self.btn(left,"⊞  Корзина промптов",self.open_prompt_trash).pack(side="bottom",fill="x",padx=10,pady=10)
+        self.btn(left,"✕  Удалить мой промпт",self.delete_my_prompts,palette="danger").pack(side="bottom",fill="x",padx=10,pady=(5,0))
         middle=tk.Frame(panel,bg="#182539",width=375);panel.add(middle,minsize=245)
         tk.Label(middle,text="  КАТАЛОГ ГЕНЕРАЦИЙ",bg="#182539",fg="#c7defa",
             pady=14,font=("Segoe UI",10,"bold")).pack(fill="x",anchor="w")
@@ -306,10 +314,8 @@ class App(tk.Tk):
                  font=("Segoe UI",9)).pack(fill="x",side="bottom",pady=3)
         self.tree.pack(side="left",fill="both",expand=True)
         scroll.pack(side="right",fill="y")
-        self.btn(deletion,"В корзину",lambda:self.delete_selected(False)).pack(side="left",fill="x",expand=True,padx=2)
-        tk.Button(deletion,text="Удалить навсегда",command=lambda:self.delete_selected(True),
-            bg="#723341",fg="white",activeforeground="white",activebackground="#9e394b",
-            relief="flat",font=("Segoe UI",9),cursor="hand2",padx=8,pady=7).pack(side="left",fill="x",expand=True,padx=2)
+        self.btn(deletion,"Видео → Корзина",lambda:self.delete_selected(False)).pack(side="left",fill="x",expand=True,padx=2)
+        self.btn(deletion,"Видео навсегда",lambda:self.delete_selected(True),palette="danger").pack(side="left",fill="x",expand=True,padx=2)
         workspace=tk.Frame(panel,bg="#19283c",padx=8,pady=8);panel.add(workspace,minsize=520)
         preview_side=tk.Frame(workspace,bg="#122238",width=255)
         preview_side.pack(side="right",fill="y",padx=(9,0))
@@ -323,6 +329,7 @@ class App(tk.Tk):
         ttk.Entry(line,textvariable=self.titlevar,font=("Segoe UI",12)).pack(side="left",fill="x",expand=True)
         self.star=self.btn(line,"☆",self.favorite);self.star.pack(side="left",padx=5)
         self.btn(line,"Сохранить",self.save,True).pack(side="left")
+        self.btn(line,"✕",self.delete_my_prompts,palette="danger").pack(side="left",padx=(4,0))
         row=tk.Frame(right,bg="#19283c",pady=8);row.pack(fill="x")
         tk.Label(row,text="Категория",bg="#19283c",fg="#c4d6f0").pack(side="left")
         self.catvar=tk.StringVar();ttk.Entry(row,textvariable=self.catvar,width=23).pack(side="left",padx=6)
@@ -396,7 +403,7 @@ class App(tk.Tk):
         bar.pack(fill="x",side="bottom",pady=6)
         self.btn(bar,"＋ Фото",self.add_photo).pack(fill="x",pady=(0,5))
         self.btn(bar,"Удалить фото",self.del_photo).pack(fill="x")
-        self.status=tk.Label(self,text="Готово к работе  •  Открой output FreeVideo — твои ролики останутся на месте.",
+        self.status=tk.Label(self,text="●  STUDIO READY    •    FREEVIDEO / PROMPTS / LoRA / STORAGE",
             bg="#121e30",fg="#a9cfed",anchor="w",padx=16,pady=10,font=("Segoe UI",10))
         self.status.pack(fill="x")
 
@@ -681,6 +688,92 @@ class App(tk.Tk):
         if not p.is_file():return
         if os.name=="nt":subprocess.Popen(["explorer",'/select,'+str(p)])
         else:subprocess.Popen(["xdg-open",str(p.parent)])
+
+    def delete_my_prompts(self):
+        """Move imported and manually created prompts to a reversible local trash."""
+        picked=list(self.tree.selection())
+        if not picked and self.selected:picked=[self.selected]
+        owned=[key for key in picked if key in self.db["items"] and
+               self.db["items"][key].get("source")!="FreeVideo"]
+        if not owned:
+            mb.showinfo("Удаление промпта",
+                "Выбери созданный вручную или импортированный промпт.\n"
+                "Для видео FreeVideo используй отдельные кнопки «Видео → Корзина».",
+                parent=self)
+            return
+        if self.selected:self.save(False)
+        titles=[self.db["items"][key].get("title","Без названия") for key in owned]
+        if not mb.askyesno("Удалить мои промпты",
+            f"Убрать из библиотеки {len(owned)} промпт(а/ов)?\n\n"
+            +"\n".join("• "+title[:95] for title in titles[:6])
+            +("\n…" if len(titles)>6 else "")
+            +"\n\nЗаписи можно восстановить через «Корзина промптов».\n"
+             "Оригинальные видео FreeVideo не будут затронуты.",parent=self,icon="warning"):
+            return
+        trash=self.db.setdefault("promptTrash",{})
+        for key in owned:
+            trash[key]={"entry":self.db["items"].pop(key),"deletedAt":int(time.time())}
+        if self.selected in owned:
+            self.clear_editor()
+        self.persist()
+        self.fill()
+        self.status.config(text=f"✓  {len(owned)} своих промптов перемещено в корзину библиотеки.")
+
+    def clear_editor(self):
+        self.selected=None
+        self.titlevar.set("")
+        self.catvar.set("")
+        self.tagvar.set("")
+        self.body.delete("1.0",tk.END)
+        self.info.config(text="")
+        self.show_lora_details({})
+        self.show_gallery()
+
+    def open_prompt_trash(self):
+        archive=self.db.setdefault("promptTrash",{})
+        win=tk.Toplevel(self,bg="#111B2C")
+        win.title("Корзина промптов")
+        win.geometry("660x460")
+        tk.Label(win,text="КОРЗИНА ПРОМПТОВ",font=("Segoe UI",16,"bold"),
+                 bg="#111B2C",fg="#ECEFFF",pady=16).pack(fill="x")
+        tk.Label(win,text="Тут только твои промпты; видео FreeVideo не меняются.",
+                 font=("Segoe UI",10),bg="#111B2C",fg="#A6BCD9").pack(pady=(0,12))
+        table=ttk.Treeview(win,columns=("source",),show="tree headings",selectmode="extended")
+        table.heading("#0",text="Промпт")
+        table.heading("source",text="Источник")
+        table.column("#0",width=450)
+        table.column("source",width=130)
+        table.pack(fill="both",expand=True,padx=17,pady=8)
+        def refill():
+            table.delete(*table.get_children())
+            for key,rec in sorted(archive.items(),key=lambda x:-x[1].get("deletedAt",0)):
+                item=rec.get("entry",{})
+                table.insert("",tk.END,iid=key,text=item.get("title","Без названия"),
+                             values=(item.get("source","Мой"),))
+        def restore():
+            keys=list(table.selection())
+            for key in keys:
+                if key not in archive:continue
+                item=archive.pop(key)["entry"]
+                self.db["items"][key]=item
+            self.persist();self.group="Все";self.fill();refill()
+            self.status.config(text=f"✓  Восстановлено промптов: {len(keys)}")
+        def forget():
+            keys=list(table.selection())
+            if not keys:return
+            if not mb.askyesno("Удалить безвозвратно",
+                f"Удалить {len(keys)} промптов из корзины навсегда?\n"
+                "Данные заметок и связей с фото восстановить больше нельзя.\n"
+                "Сами фото, если есть, останутся в локальном хранилище.",
+                parent=win,icon="warning"):return
+            for key in keys:archive.pop(key,None)
+            self.persist();refill()
+        bar=tk.Frame(win,bg="#111B2C",pady=14)
+        bar.pack(fill="x",padx=15)
+        self.btn(bar,"↶  Восстановить",restore,True).pack(side="left",padx=5)
+        self.btn(bar,"✕  Очистить выбранное",forget,palette="danger").pack(side="left",padx=5)
+        self.btn(bar,"Закрыть",win.destroy).pack(side="right",padx=5)
+        refill()
 
     def delete_selected(self, permanent=False):
         selected=list(self.tree.selection())
