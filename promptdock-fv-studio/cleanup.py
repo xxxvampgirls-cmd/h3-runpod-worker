@@ -144,6 +144,22 @@ def inspect(output, now=None):
     return totals
 
 
+
+def recovery_evidence(folder):
+    """Informational warning only. These files may be worth keeping, but do
+    not imply that FreeVideo has a supported resume operation for this run.
+    """
+    folder = Path(folder)
+    known = ("first.png", "last.png", "frame-preview.jpg", "input-conditioning.pt",
+             "continuation-source.safetensors", "video.artifacts/latents.pt",
+             "video.artifacts/conditioning.pt", "video.artifacts/refine-input.pt")
+    found = [p for p in known if (folder / p).is_file() and not reparse(folder / p)]
+    for entry in sorted(folder.glob("reference-??.png")):
+        if re.fullmatch(r"reference-\d\d\.png",entry.name) and entry.is_file() and not reparse(entry):
+            found.append(entry.name)
+            if len(found)>=12: break
+    return found[:12]
+
 def eligible_failed(folder, root, now=None):
     """Revalidate a failed creation before any caller considers deletion."""
     now = time.time() if now is None else now
