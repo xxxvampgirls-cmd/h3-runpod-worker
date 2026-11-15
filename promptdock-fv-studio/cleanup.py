@@ -148,19 +148,44 @@ def inspect(output, now=None):
 
 
 def recovery_evidence(folder):
-    """Informational warning only. These files may be worth keeping, but do
-    not imply that FreeVideo has a supported resume operation for this run.
+    """Informational warning: some unfinished runs retain useful input and latent data.
+
+    Do not claim a failed run can be resumed. Look at known attempt folders too;
+    otherwise a failed retry would be misclassified as having nothing to keep.
     """
-    folder = Path(folder)
-    known = ("first.png", "last.png", "frame-preview.jpg", "input-conditioning.pt",
-             "continuation-source.safetensors", "video.artifacts/latents.pt",
-             "video.artifacts/conditioning.pt", "video.artifacts/refine-input.pt")
-    found = [p for p in known if (folder / p).is_file() and not reparse(folder / p)]
+    folder=Path(folder)
+    known=("first.png","last.png","frame-preview.jpg","input-conditioning.pt",
+           "continuation-source.safetensors","video.artifacts/latents.pt",
+           "video.artifacts/conditioning.pt","video.artifacts/refine-input.pt",
+           "video.artifacts/rgb.npy","video.artifacts/audio.npy")
+    result=[]
+    for name in known:
+        file=folder/name
+        try:
+            if file.is_file() and not reparse(file) and file.stat().st_size>0:
+                result.append(name)
+        except OSError:pass
     for entry in sorted(folder.glob("reference-??.png")):
-        if re.fullmatch(r"reference-\d\d\.png",entry.name) and entry.is_file() and not reparse(entry):
-            found.append(entry.name)
-            if len(found)>=12: break
-    return found[:12]
+        if not re.fullmatch(r"reference-\d{2}\.png",entry.name):continue
+        try:
+            if entry.is_file() and not reparse(entry) and entry.stat().st_size>0:
+                result.append(entry.name)
+        except OSError:pass
+        if len(result)>=12:return result[:12]
+    attempts=folder/"video.artifacts"/"attempts"
+    if attempts.is_dir() and not reparse(attempts):
+        for attempt in sorted(attempts.iterdir()):
+            if not ATTEMPT.fullmatch(attempt.name) or not attempt.is_dir() or reparse(attempt):
+                continue
+            for name in ("latents.pt","conditioning.pt","refine-input.pt","rgb.npy","audio.npy"):
+                file=attempt/name
+                try:
+                    if file.is_file() and not reparse(file) and file.stat().st_size>0:
+                        result.append("video.artifacts/attempts/"+attempt.name+"/"+name)
+                except OSError:pass
+                if len(result)>=12:return result[:12]
+    return result[:12]
+
 
 def eligible_failed(folder, root, now=None):
     """Revalidate a failed creation before any caller considers deletion."""
