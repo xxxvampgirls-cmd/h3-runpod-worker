@@ -1287,4 +1287,11 @@ class App(tk.Tk):
         self.destroy()
 
 if __name__=="__main__":
-    App().mainloop()
+    if "--smoke-ui" in sys.argv:
+        # Windows CI checks actual Tk startup and widget geometry.
+        window=App()
+        window.update_idletasks()
+        window.update()
+        window.destroy()
+    else:
+        App().mainloop()
