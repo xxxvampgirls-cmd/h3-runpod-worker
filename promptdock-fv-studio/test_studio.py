@@ -41,7 +41,6 @@ class FreeVideoSafetyTests(unittest.TestCase):
     def test_safeguard_and_full_scan(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d)/"output"/"FreeVideo"
-            folder=root/"2026-11-15"/"f"*0
             folder=root/"2026-11-15"/("a"*32)
             folder.mkdir(parents=True)
             video=folder/"video.mp4"
