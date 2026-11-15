@@ -382,14 +382,14 @@ class App(tk.Tk):
         tk.Label(gallery,text="◈  ПРЕВЬЮ",bg="#122238",fg="#95ddff",
             font=("Segoe UI",11,"bold")).pack(anchor="w",pady=(0,8))
         self.preview_label=tk.Label(gallery,text="Выбери видео\nдля просмотра",
-            bg="#081320",fg="#7f9ebf",font=("Segoe UI",10),width=26,height=11,
+            bg="#081320",fg="#7f9ebf",font=("Segoe UI",10),width=26,height=9,
             cursor="hand2",relief="flat")
         self.preview_label.pack(fill="x",pady=3)
         self.preview_label.bind("<Button-1>",lambda e:self.zoom(0) if self.gallery else self.video())
-        self.btn(gallery,"▶ Открыть видео",self.video,True).pack(fill="x",pady=6)
+        self.btn(gallery,"▶ Открыть видео",self.video,True).pack(fill="x",pady=3)
         tk.Label(gallery,text="МИНИ-ГАЛЕРЕЯ",bg="#122238",fg="#b5ccf2",
-            font=("Segoe UI",9,"bold")).pack(anchor="w",pady=(12,4))
-        self.frames=tk.Frame(gallery,bg="#122238",height=195)
+            font=("Segoe UI",9,"bold")).pack(anchor="w",pady=(7,3))
+        self.frames=tk.Frame(gallery,bg="#122238",height=152)
         self.frames.pack(fill="x")
         self.frames.pack_propagate(False)
         bar=tk.Frame(gallery,bg="#122238")
@@ -743,7 +743,7 @@ class App(tk.Tk):
     def show_gallery(self):
         for child in self.frames.winfo_children():child.destroy()
         self.keep=[];self.gallery=[];self.preview_image=None
-        self.preview_label.configure(image="",text="Нет изображения")
+        self.preview_label.configure(image="",text="Нет изображения",width=26,height=9)
         if not self.selected:return
         item=self.db["items"][self.selected]
         self.gallery=pics(item)
@@ -768,23 +768,23 @@ class App(tk.Tk):
                 threading.Thread(target=task,daemon=True).start()
             else:self.preview_label.configure(text="Загружается\nкадр из видео…")
         all_pics=list(self.gallery)
-        for i,p in enumerate(all_pics[:6]):
+        for i,p in enumerate(all_pics[:4]):
             try:
                 with Image.open(p) as im:
-                    im.thumbnail((100,70));photo=ImageTk.PhotoImage(im.convert("RGB"))
+                    im.thumbnail((100,64));photo=ImageTk.PhotoImage(im.convert("RGB"))
                 self.keep.append(photo)
                 tk.Button(self.frames,image=photo,relief="flat",bg="#122238",cursor="hand2",
                     command=lambda j=i:self.zoom(j)).grid(row=i//2,column=i%2,padx=3,pady=3)
             except (ValueError,OSError):pass
-        if len(all_pics)>6:
-            self.btn(self.frames,f"Ещё: {len(all_pics)-6}",lambda:self.zoom(6)).grid(row=3,column=0,columnspan=2)
+        if len(all_pics)>4:
+            self.btn(self.frames,f"Ещё: {len(all_pics)-4}",lambda:self.zoom(4)).grid(row=2,column=0,columnspan=2)
 
     def display_large_preview(self, image_path):
         try:
             with Image.open(image_path) as im:
-                im.thumbnail((235,205))
+                im.thumbnail((235,180))
                 self.preview_image=ImageTk.PhotoImage(im.convert("RGB"))
-            self.preview_label.configure(image=self.preview_image,text="",height=205,width=235)
+            self.preview_label.configure(image=self.preview_image,text="",height=180,width=235)
         except (ValueError,OSError):
             self.preview_label.configure(image="",text="Превью повреждено")
 
