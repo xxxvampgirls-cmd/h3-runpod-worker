@@ -224,7 +224,7 @@ def build_preview(video):
 
 def pics(row):
     out=[]
-    for item in [row.get("preview",""),*row.get("images",[])]:
+    for item in [row.get("preview",""),row.get("generatedPreview",""),*row.get("images",[])]:
         if not item:continue
         p=Path(item)
         if p.is_file() and not p.is_symlink() and p.suffix.lower() in PIC and p not in out:out.append(p)
@@ -527,7 +527,141 @@ class App(tk.Tk):
         self.persist();self.fill()
         if self.selected and self.selected in self.db["items"]:
             self.show_lora_details(self.db["items"][self.selected])
+            self.show_gallery()
         self.status.config(text=f"◉ Проверено {len(rows)} видео  •  новых: {new}  •  оригиналы не изменены.")
+
+    def bridge_folder(self):
+        raw=self.db.get("bridgePath","")
+        if not isinstance(raw,str) or not raw:return None
+        p=Path(raw)
+        return p if (p/"__init__.py").is_file() and (p/"web"/"bridge.js").is_file() else None
+
+    def install_bridge(self):
+        if not mb.askyesno("Локальный мост FreeVideo",
+            "Установить маленькое дополнение в ComfyUI/custom_nodes?\n\n"
+            "Оно получает только выбранный тобой промпт, LoRA и параметры, "
+            "меняет открытый граф FreeVideo. Не запускает генерацию и не изменяет файлы видео.\n\n"
+            "После установки потребуется перезапустить FreeVideo / ComfyUI.",
+            parent=self):return
+        initial=self.db.get("customNodes") or self.db.get("output") or str(Path.home())
+        folder=fd.askdirectory(title="Выбери папку ComfyUI/custom_nodes",initialdir=initial,parent=self)
+        if not folder:return
+        node_dir=Path(folder)
+        if node_dir.name.casefold()!="custom_nodes" and (node_dir/"custom_nodes").is_dir():
+            node_dir=node_dir/"custom_nodes"
+        if node_dir.name.casefold()!="custom_nodes" or not node_dir.is_dir():
+            mb.showerror("Не найдена папка","Нужно выбрать настоящую папку ComfyUI/custom_nodes.",parent=self)
+            return
+        if _is_reparse(node_dir):
+            mb.showerror("Установка","Папка является ссылкой или точкой подключения. Выбери обычную папку.",parent=self)
+            return
+        source=package_bridge_path()
+        if not (source/"__init__.py").is_file() or not (source/"web"/"bridge.js").is_file():
+            mb.showerror("Ошибка","В сборке отсутствуют файлы моста.",parent=self)
+            return
+        target=node_dir/BRIDGE_NAME
+        if target.exists() and (not target.is_dir() or
+           not (target/"__init__.py").is_file() or
+           "PromptDock one-way local handoff" not in (target/"__init__.py").read_text(encoding="utf-8",errors="replace")):
+            mb.showerror("Нельзя перезаписать","Папка назначения занята другим дополнением.",parent=self)
+            return
+        try:
+            (target/"web").mkdir(parents=True,exist_ok=True)
+            shutil.copy2(source/"__init__.py",target/"__init__.py")
+            shutil.copy2(source/"web"/"bridge.js",target/"web"/"bridge.js")
+            (target/"queue").mkdir(exist_ok=True)
+            self.db["customNodes"]=str(node_dir)
+            self.db["bridgePath"]=str(target)
+            self.persist()
+            mb.showinfo("Мост установлен","Готово!\n\n1. Перезапусти FreeVideo / ComfyUI.\n"
+              "2. Открой окно с графом FreeVideo.\n"
+              "3. Выбери промпт в библиотеке и нажми «Применить в FreeVideo».\n\n"
+              "После этого текст и параметры появятся в открытом графе.",parent=self)
+            self.status.config(text="⇄ Мост установлен. Перезапусти FreeVideo / ComfyUI.")
+        except (OSError,ValueError) as error:
+            mb.showerror("Установка",str(error),parent=self)
+
+    def apply_to_freevideo(self):
+        if not self.selected or self.selected not in self.db["items"]:
+            mb.showinfo("Применить","Сначала выбери один промпт.",parent=self)
+            return
+        target=self.bridge_folder()
+        if not target:
+            self.install_bridge()
+            return
+        self.save(False)
+        item=self.db["items"][self.selected]
+        include=[]
+        if self.apply_loras.get():
+            all_rows=item.get("loraDetails") or []
+            ids=self.lora_tree.selection()
+            if ids:
+                try:all_rows=[all_rows[int(i)] for i in ids]
+                except (IndexError,ValueError):pass
+            # Prefer LoRAs actually used; keep workflow-only rows only if no actual list exists.
+            elif any(row.get("source")=="Применена" for row in all_rows):
+                all_rows=[row for row in all_rows if row.get("source")=="Применена"]
+            for row in all_rows:
+                name=row.get("name","")
+                strength=row.get("strength")
+                if isinstance(name,str) and name.lower().endswith(".safetensors") and type(strength) in (int,float):
+                    if math.isfinite(strength) and strength!=0:
+                        include.append(dict(name=name,strength=strength))
+            if all_rows and len(include)<len(all_rows):
+                mb.showwarning("Часть LoRA пропущена",
+                    "Некоторые LoRA не имеют сохранённого значения Strength. "
+                    "Они не будут применены — программа не придумывает параметры.",parent=self)
+            if not all_rows and not mb.askyesno("LoRA не найдены",
+               "В записи LoRA отсутствуют. Продолжить без изменения LoRA в FreeVideo?",parent=self):
+                return
+        g=item.get("geometry",{})
+        geometry=({k:g[k] for k in ("width","height","seconds") if type(g.get(k)) in (int,float) and g[k]>0}
+                  if self.apply_size.get() and isinstance(g,dict) else None)
+        seed=item.get("seed") if self.apply_seed.get() and type(item.get("seed")) is int else None
+        prompt=self.body.get("1.0","end-1c") if self.apply_text.get() else None
+        if not any([prompt is not None,include,seed is not None,geometry]):
+            mb.showinfo("Пустой выбор","Выбери хотя бы один параметр для применения.",parent=self)
+            return
+        what=[]
+        if prompt is not None:what.append("текст")
+        if include:what.append(f"LoRA: {len(include)}")
+        if seed is not None:what.append(f"seed {seed}")
+        if geometry:what.append("размер / время")
+        if not mb.askyesno("Применить в FreeVideo",
+              "Поменять параметры в ОТКРЫТОМ графе FreeVideo?\n\n"
+              +", ".join(what)+"\n\nТекущие настройки могут быть заменены.\n"
+              "Генерация НЕ запускается.",parent=self):return
+        payload=dict(text=prompt,loras=include if include else None,seed=seed,geometry=geometry)
+        queue=target/"queue"
+        request=dict(id=uuid.uuid4().hex,expires=time.time()+90,payload=payload)
+        try:
+            queue.mkdir(exist_ok=True)
+            draft=queue/"pending.tmp"
+            draft.write_text(json.dumps(request,ensure_ascii=False),encoding="utf-8")
+            draft.replace(queue/"pending.json")
+            (queue/"ack.json").unlink(missing_ok=True)
+            self.status.config(text="⇢ Ожидание FreeVideo… Открой окно FreeVideo в браузере.")
+            self.wait_for_ack(request["id"],queue,0)
+        except OSError as error:
+            mb.showerror("Не удалось отправить",str(error),parent=self)
+
+    def wait_for_ack(self,request_id,queue,attempt):
+        reply=load_json(queue/"ack.json",50_000)
+        if reply.get("id")==request_id:
+            if reply.get("ok"):
+                self.status.config(text="✓ "+reply.get("message","Настройки применены"))
+                mb.showinfo("FreeVideo",reply.get("message","Настройки применены"),parent=self)
+            else:
+                self.status.config(text="Не удалось применить: "+reply.get("message",""))
+                mb.showwarning("FreeVideo",reply.get("message","Неизвестная ошибка"),parent=self)
+            return
+        if attempt>=60:
+            self.status.config(text="Мост не ответил. Проверь, запущен ли FreeVideo и установлен ли мост.")
+            mb.showwarning("Мост не отвечает",
+                "Открой FreeVideo после перезапуска ComfyUI и убедись, что есть узел генерации.\n"
+                "Запрос истечёт автоматически; генерация не запущена.",parent=self)
+            return
+        self.after(1500,lambda:self.wait_for_ack(request_id,queue,attempt+1))
 
     def copy(self):
         if not self.selected:return
@@ -608,18 +742,53 @@ class App(tk.Tk):
 
     def show_gallery(self):
         for child in self.frames.winfo_children():child.destroy()
-        self.keep=[];self.gallery=[]
+        self.keep=[];self.gallery=[];self.preview_image=None
+        self.preview_label.configure(image="",text="Нет изображения")
         if not self.selected:return
-        self.gallery=pics(self.db["items"][self.selected])
-        for i,p in enumerate(self.gallery[:7]):
+        item=self.db["items"][self.selected]
+        self.gallery=pics(item)
+        if self.gallery:
+            self.display_large_preview(self.gallery[0])
+        elif item.get("video"):
+            video=item["video"]
+            if video not in self.preview_requested:
+                self.preview_requested.add(video)
+                self.preview_label.configure(text="Загружается\nкадр из видео…")
+                def task():
+                    result=build_preview(video)
+                    def complete():
+                        self.preview_requested.discard(video)
+                        if not self.selected or self.db["items"].get(self.selected,{}).get("video")!=video:return
+                        if result and Path(result).is_file():
+                            self.db["items"][self.selected]["generatedPreview"]=result
+                            self.show_gallery()
+                        else:self.preview_label.configure(text="Превью не найдено\n▶ Открыть видео")
+                    try:self.after(0,complete)
+                    except RuntimeError:pass
+                threading.Thread(target=task,daemon=True).start()
+            else:self.preview_label.configure(text="Загружается\nкадр из видео…")
+        all_pics=list(self.gallery)
+        for i,p in enumerate(all_pics[:6]):
             try:
                 with Image.open(p) as im:
-                    im.thumbnail((132,92));photo=ImageTk.PhotoImage(im.convert("RGB"))
+                    im.thumbnail((100,70));photo=ImageTk.PhotoImage(im.convert("RGB"))
                 self.keep.append(photo)
-                tk.Button(self.frames,image=photo,relief="flat",bg="#101e30",cursor="hand2",
-                    command=lambda j=i:self.zoom(j)).pack(side="left",padx=4)
+                tk.Button(self.frames,image=photo,relief="flat",bg="#122238",cursor="hand2",
+                    command=lambda j=i:self.zoom(j)).grid(row=i//2,column=i%2,padx=3,pady=3)
             except (ValueError,OSError):pass
-        if len(self.gallery)>7:self.btn(self.frames,f"+{len(self.gallery)-7}",lambda:self.zoom(7)).pack(side="left")
+        if len(all_pics)>6:
+            self.btn(self.frames,f"Ещё: {len(all_pics)-6}",lambda:self.zoom(6)).grid(row=3,column=0,columnspan=2)
+
+    def display_large_preview(self, image_path):
+        try:
+            with Image.open(image_path) as im:
+                im.thumbnail((235,205))
+                self.preview_image=ImageTk.PhotoImage(im.convert("RGB"))
+            self.preview_label.configure(image=self.preview_image,text="",height=205,width=235)
+        except (ValueError,OSError):
+            self.preview_label.configure(image="",text="Превью повреждено")
+
+
 
     def zoom(self,index):
         if not self.gallery:return
