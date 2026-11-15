@@ -14,6 +14,7 @@ from ui_widgets import PillButton
 from cleanup import inspect as inspect_storage, api_query, eligible_failed, root_dir
 from bridge_embedded import BRIDGE_PY, BRIDGE_JS
 from integration import discover as discover_comfyui, nodes_from_choice as resolve_custom_nodes
+from reference_links import linked_originals
 
 ROOT=Path(os.environ.get("LOCALAPPDATA") or Path.home())/"PromptDock-FreeVideo-Studio"
 DB=ROOT/"library.json"
@@ -151,7 +152,7 @@ def run_reference_images(home):
             except OSError:pass
     return files
 
-def from_freevideo(folder):
+def from_freevideo(folder, input_root_override=None):
     root=Path(folder).expanduser()
     if root.name.casefold()!="freevideo":root=root/"FreeVideo"
     if not root.is_dir():return []
@@ -166,6 +167,8 @@ def from_freevideo(folder):
             prompt=p.read_text(encoding="utf-8-sig")[:80000] if p.is_file() and not p.is_symlink() else ""
             wf=load_json(home/"workflow.json")
             lora_details=read_lora_details(home,req,wf)
+            originals=linked_originals(root,req,wf,load_json(home/"media.json"),
+                        load_json(home/"video.request.json"),input_override=input_root_override)
             preview=next((str(home/n) for n in ("video.thumbnail.jpg","frame-preview.jpg","first.png") if (home/n).is_file()),"")
             rows.append(dict(id="fv:"+home.relative_to(root).as_posix(),source="FreeVideo",
                 title=(prompt.strip().splitlines()[0][:95] if prompt.strip() else home.name[:16]),
@@ -173,7 +176,7 @@ def from_freevideo(folder):
                 seed=req.get("seed") if type(req.get("seed")) is int else None,
                 geometry=req.get("geometry") if isinstance(req.get("geometry"),dict) else {},
                 loras=[r["name"] for r in lora_details],loraDetails=lora_details,
-                sourceImages=run_reference_images(home),
+                sourceImages=run_reference_images(home),sourceOriginals=originals,
                 createdAt=int(video.stat().st_mtime*1000)))
         except (OSError,ValueError,UnicodeError,IndexError):continue
     return sorted(rows,key=lambda r:r["createdAt"],reverse=True)
@@ -251,7 +254,9 @@ def build_preview(video):
 
 def pics(row):
     out=[]
-    for item in [row.get("preview",""),row.get("generatedPreview",""),*row.get("sourceImages",[]),*row.get("images",[])]:
+    for item in [row.get("preview",""),row.get("generatedPreview",""),
+                 *[r["path"] for r in row.get("sourceOriginals",[]) if r.get("exists") and r.get("kind")=="изображение"],
+                 *row.get("sourceImages",[]),*row.get("images",[])]:
         if not item:continue
         p=Path(item)
         if p.is_file() and not p.is_symlink() and p.suffix.lower() in PIC and p not in out:out.append(p)
@@ -378,7 +383,7 @@ class App(tk.Tk):
         self.btn(apply_row,"⇢ Применить в FreeVideo",self.apply_to_freevideo,True).pack(side="right",padx=4)
         controls=tk.Frame(right,bg="#19283c",pady=8);controls.pack(fill="x")
         for label,cmd in [("📋 Копировать",self.copy),("▶ Видео",self.video),
-            ("📂 Папка",self.open_folder),("⧉ Дубликат",self.duplicate)]:
+            ("📂 Папка",self.open_folder),("📄 Промпт",self.show_original_prompt),("⧉ Дубликат",self.duplicate)]:
             self.btn(controls,label,cmd).pack(side="left",padx=3)
         self.info=tk.Label(right,text="",bg="#19283c",fg="#afd2f5",justify="left",anchor="w",
             wraplength=620,font=("Segoe UI",10))
@@ -418,7 +423,9 @@ class App(tk.Tk):
             cursor="hand2",relief="flat")
         self.preview_label.pack(fill="x",pady=3)
         self.preview_label.bind("<Button-1>",lambda e:self.zoom(0) if self.gallery else self.video())
-        self.btn(gallery,"▶ Открыть видео",self.video,True).pack(fill="x",pady=3)
+        self.btn(gallery,"▶ Смотреть здесь",self.video,True).pack(fill="x",pady=3)
+        self.btn(gallery,"◈ Оригиналы / пути",self.show_originals).pack(fill="x",pady=3)
+        self.btn(gallery,"Указать папку input",self.pick_input).pack(fill="x",pady=3)
         tk.Label(gallery,text="КАДРЫ / РЕФЕРЕНСЫ",bg="#122238",fg="#b5ccf2",
             font=("Segoe UI",9,"bold")).pack(anchor="w",pady=(7,3))
         self.source_count=tk.Label(gallery,text="Сохранено копий референсов: 0",
@@ -547,14 +554,14 @@ class App(tk.Tk):
     def scan(self):
         folder=self.db.get("output")
         if not folder:self.pick_output();return
-        rows=from_freevideo(folder);new=0
+        rows=from_freevideo(folder,self.db.get("inputRoot"));new=0
         for item in rows:
             key=item["id"]
             if key not in self.db["items"] and key in self.db.get("deletedHistory",{}):
                 self.db["items"][key]=self.db["deletedHistory"].pop(key)
             if key in self.db["items"]:
                 it=self.db["items"][key]
-                it.update({name:item[name] for name in ("video","preview","seed","geometry","loras","loraDetails","sourceImages")})
+                it.update({name:item[name] for name in ("video","preview","seed","geometry","loras","loraDetails","sourceImages","sourceOriginals")})
                 if not it.get("prompt"):it["prompt"]=item["prompt"]
             else:
                 item.update(category="FreeVideo",tags="",favorite=False,images=[])
@@ -813,11 +820,129 @@ class App(tk.Tk):
         self.status.config(text="Промпт скопирован")
 
     def video(self):
+        """Open the Studio player, not a separate system media player."""
         if not self.selected:return
         p=Path(self.db["items"][self.selected].get("video") or "")
         if not p.is_file():mb.showinfo("Видео","Видео для этого промпта не найдено");return
-        if os.name=="nt":os.startfile(str(p))
-        else:subprocess.Popen(["xdg-open",str(p)])
+        from studio_player import VideoPlayer
+        VideoPlayer(self, str(p))
+
+
+    def pick_input(self):
+        output=self.db.get("output")
+        current=self.db.get("inputRoot")
+        from reference_links import input_root_for_output
+        suggested=input_root_for_output(output) if output else None
+        path=fd.askdirectory(title="ComfyUI / input (исходники FreeVideo)",
+                   initialdir=str(current or (suggested if suggested and suggested.is_dir() else Path.home())))
+        if not path:return
+        root=Path(path)
+        if root.name.lower()!="input":
+            mb.showwarning("Исходники","Выбери именно папку ComfyUI\\input.",parent=self)
+            return
+        self.db["inputRoot"]=str(root)
+        self.persist()
+        self.scan()
+
+    def show_original_prompt(self):
+        """Show the immutable text actually saved with the video."""
+        if not self.selected:return
+        row=self.db["items"][self.selected]
+        source=row.get("prompt","")
+        if not source:
+            mb.showinfo("Исходный текст","В сохранённых данных исходный промпт отсутствует.",parent=self)
+            return
+        win=tk.Toplevel(self,bg="#101B2D")
+        win.title("Оригинальный промпт • только просмотр")
+        win.geometry("800x530")
+        tk.Label(win,text="ИСХОДНЫЙ ТЕКСТ ГЕНЕРАЦИИ",bg="#101B2D",fg="#BFD5FE",
+                 font=("Segoe UI",13,"bold")).pack(anchor="w",padx=20,pady=14)
+        box=tk.Text(win,wrap="word",bg="#17263B",fg="#ECF4FF",padx=12,pady=12,
+                    relief="flat",font=("Consolas",11))
+        box.pack(fill="both",expand=True,padx=18,pady=5)
+        box.insert("1.0",source)
+        box.configure(state="disabled")
+        bar=tk.Frame(win,bg="#101B2D")
+        bar.pack(fill="x",padx=18,pady=14)
+        def copy_source():
+            win.clipboard_clear();win.clipboard_append(source)
+        self.btn(bar,"Копировать текст",copy_source,True).pack(side="left")
+        self.btn(bar,"Закрыть",win.destroy).pack(side="right")
+
+    def show_originals(self):
+        """Show verified references without duplicating or modifying any image."""
+        if not self.selected:return
+        row=self.db["items"][self.selected]
+        originals=row.get("sourceOriginals",[])
+        copies=row.get("sourceImages",[])
+        win=tk.Toplevel(self,bg="#101B2D")
+        win.title("Файлы исходников • " + row.get("title",""))
+        win.geometry("900x550")
+        tk.Label(win,text="ИЗОБРАЖЕНИЯ И ИСХОДНЫЕ ФАЙЛЫ",bg="#101B2D",fg="#E2EBFC",
+                 font=("Segoe UI",15,"bold")).pack(anchor="w",padx=18,pady=(18,7))
+        tk.Label(win,text="Ссылки на файлы FreeVideo, без копирования. «Нет» означает, что исходник по сохранённому пути отсутствует.",
+                 bg="#101B2D",fg="#9DB5D1",font=("Segoe UI",9),wraplength=820).pack(anchor="w",padx=18)
+        rows=[{"name":x.get("name","?"),"role":x.get("role","референс"),
+               "path":x.get("path",""),"note":"Оригинал" if x.get("exists") else "Нет на диске"}
+              for x in originals]
+        rows += [{"name":Path(x).name,"role":"референс генерации","path":x,"note":"Копия генерации"}
+                 for x in copies]
+        area=tk.Frame(win,bg="#101B2D");area.pack(fill="both",expand=True,padx=18,pady=12)
+        tr=ttk.Treeview(area,columns=("role","status","path"),show="tree headings",height=10)
+        for key,title,width in (("#0","Файл",180),("role","Роль",120),("status","Тип",140),("path","Расположение",410)):
+            tr.heading(key,text=title);tr.column(key,width=width,minwidth=90)
+        tr.pack(side="left",fill="both",expand=True)
+        scroll=ttk.Scrollbar(area,command=tr.yview)
+        scroll.pack(side="right",fill="y");tr.configure(yscrollcommand=scroll.set)
+        for i,item in enumerate(rows):
+            tr.insert("",tk.END,iid=str(i),text=item["name"],
+                     values=(item["role"],item["note"],item["path"]))
+        def selected_path():
+            keys=tr.selection()
+            return Path(rows[int(keys[0])]["path"]) if keys else None
+        def copy_path():
+            p=selected_path()
+            if p:
+                win.clipboard_clear();win.clipboard_append(str(p))
+        def reveal():
+            p=selected_path()
+            if not p:return
+            if not p.is_file():
+                mb.showwarning("Исходник","Файл больше не существует по этому пути.",parent=win)
+                return
+            try:
+                if os.name=="nt":
+                    subprocess.Popen(["explorer.exe","/select,",str(p)])
+                else:
+                    subprocess.Popen(["xdg-open",str(p.parent)])
+            except OSError as exc:mb.showwarning("Папка",str(exc),parent=win)
+        def view():
+            p=selected_path()
+            if not p or not p.is_file():
+                mb.showwarning("Исходник","Файл не найден.",parent=win);return
+            if p.suffix.lower() not in PIC:
+                mb.showinfo("Просмотр","Это не изображение. Используй «Открыть папку».",parent=win);return
+            popup=tk.Toplevel(win,bg="#0B1523")
+            popup.title(p.name);popup.geometry("900x720")
+            image_label=tk.Label(popup,bg="#0B1523");image_label.pack(fill="both",expand=True,padx=12,pady=12)
+            try:
+                with Image.open(p) as original:
+                    original.thumbnail((850,650))
+                    photo=ImageTk.PhotoImage(original.convert("RGB"))
+                image_label.configure(image=photo);image_label.image=photo
+            except (OSError,ValueError):
+                popup.destroy()
+                mb.showwarning("Просмотр","Не удалось прочитать изображение.",parent=win)
+        tr.bind("<Double-1>",lambda e:view())
+        bar=tk.Frame(win,bg="#101B2D");bar.pack(fill="x",padx=18,pady=(0,15))
+        for label,cmd in (("Посмотреть",view),("Открыть папку",reveal),
+                          ("Копировать путь",copy_path),("Закрыть",win.destroy)):
+            self.btn(bar,label,cmd).pack(side="left",padx=4)
+        if not rows:
+            mb.showinfo("Сохранённые источники",
+                "В данных генерации нет явной ссылки на исходный файл. "
+                "Программа не будет угадывать его по имени. Сохранённых копий тоже нет.",
+                parent=win)
 
     def open_folder(self):
         if not self.selected:return
@@ -1230,7 +1355,7 @@ class App(tk.Tk):
         if not self.selected:return
         item=self.db["items"][self.selected]
         self.gallery=pics(item)
-        self.source_count.configure(text=f"Сохранено копий референсов: {len(item.get('sourceImages',[]))}")
+        self.source_count.configure(text=f"Оригиналы: {len(item.get('sourceOriginals',[]))} · копии: {len(item.get('sourceImages',[]))}")
         if self.gallery:
             self.display_large_preview(self.gallery[0])
         elif item.get("video"):
