@@ -11,10 +11,12 @@ TARGET_NAME = "custom_nodes"
 def _ordinary_directory(path):
     try:
         p = Path(path)
-        if p.is_symlink() or not p.is_dir():
-            return False
-        # Windows directory junctions and other reparse points are not followed.
-        return not bool(getattr(p.stat(follow_symlinks=False), "st_file_attributes", 0) & 0x400)
+        # Reject parent junctions too, to avoid following them on Windows.
+        for part in (p, *p.parents):
+            info = os.lstat(part)
+            if os.path.islink(part) or bool(getattr(info, "st_file_attributes", 0) & 0x400):
+                return False
+        return p.is_dir()
     except (OSError, ValueError, TypeError):
         return False
 
