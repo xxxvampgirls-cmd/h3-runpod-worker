@@ -689,6 +689,258 @@ class App(tk.Tk):
         if os.name=="nt":subprocess.Popen(["explorer",'/select,'+str(p)])
         else:subprocess.Popen(["xdg-open",str(p.parent)])
 
+    # Disk Cleaner is deliberately opt-in: periodic audits never delete files.
+    def periodic_storage_audit(self):
+        if self.db.get("output"):
+            self.refresh_storage_audit()
+        if self.winfo_exists():
+            self.after(600000,self.periodic_storage_audit)
+
+    def refresh_storage_audit(self):
+        if self.disk_scanning:
+            return
+        output=self.db.get("output")
+        if not output:
+            self.disk_hint.config(text="●  OUTPUT НЕ ПОДКЛЮЧЁН")
+            return
+        self.disk_scanning=True
+        def inspect_background():
+            try:result=inspect_storage(output)
+            except (OSError,ValueError) as exc:result={"error":str(exc)}
+            def finish():
+                self.disk_scanning=False
+                self.disk_report=result
+                if "error" in result:
+                    self.disk_hint.config(text="●  ОШИБКА СКАНИРОВАНИЯ")
+                else:
+                    self.disk_hint.config(text=f"●  FREEVIDEO  {self.bytes_fmt(result['all_bytes'])}")
+                self.paint_storage_dialog()
+            try:self.after(0,finish)
+            except (RuntimeError,tk.TclError):pass
+        threading.Thread(target=inspect_background,name="promptdock-disk-audit",daemon=True).start()
+
+    @staticmethod
+    def bytes_fmt(value):
+        if not isinstance(value,(int,float)) or value < 0:return "—"
+        return (f"{value/1024**3:.2f} ГБ" if value >= 1024**3 else
+                f"{value/1024**2:.1f} МБ" if value >= 1024**2 else
+                f"{value/1024:.0f} КБ")
+
+    def own_thumbnail_size(self):
+        size=0
+        if THUMBS.is_dir() and not _is_reparse(THUMBS):
+            for file in THUMBS.glob("*.jpg"):
+                try:
+                    if re.fullmatch(r"[0-9a-f]{28}\.jpg",file.name) and not _is_reparse(file):
+                        size += file.stat().st_size
+                except OSError:pass
+        return size
+
+    def open_storage(self):
+        if not self.db.get("output"):
+            self.pick_output()
+            if not self.db.get("output"):return
+        if self.disk_window and self.disk_window.winfo_exists():
+            self.disk_window.lift()
+            self.refresh_storage_audit()
+            return
+        win=tk.Toplevel(self)
+        self.disk_window=win
+        win.title("STUDIO • Анализ и очистка диска")
+        win.geometry("780x690")
+        win.minsize(680,600)
+        win.configure(bg="#0D1626")
+        def closing():
+            self.disk_window=None
+            self.storage_labels={}
+            win.destroy()
+        win.protocol("WM_DELETE_WINDOW",closing)
+        hero=tk.Frame(win,bg="#18243B",padx=25,pady=18)
+        hero.pack(fill="x",padx=14,pady=(14,8))
+        tk.Label(hero,text="◈  DISK CONTROL",fg="#ECF2FF",bg="#18243B",
+            font=("Segoe UI",20,"bold")).pack(side="left")
+        tk.Label(hero,text="SAFE  •  LOCAL",bg="#1D3D43",fg="#A2F4DF",
+            font=("Segoe UI",9,"bold"),padx=11,pady=6).pack(side="right")
+        tk.Label(win,text="Контроль файлов FreeVideo  /  Автопроверка каждые 10 минут",
+            bg="#0D1626",fg="#A6B9D7",font=("Segoe UI",10)).pack(anchor="w",padx=28,pady=(6,12))
+        grid=tk.Frame(win,bg="#0D1626")
+        grid.pack(fill="x",padx=16)
+        grid.columnconfigure(0,weight=1);grid.columnconfigure(1,weight=1)
+        self.storage_labels={}
+        cards=[
+            ("total","ВСЕ ФАЙЛЫ ГЕНЕРАЦИЙ","#D8DDFC"),
+            ("video","ГОТОВЫЕ MP4","#A0EDDD"),
+            ("working","ПРОМЕЖУТОЧНЫЕ (ОЦЕНКА)","#FFDF9B"),
+            ("failed","НЕУДАЧНЫЕ > 24 ЧАСОВ","#F9B6C3"),
+            ("other","ПРОЧИЕ ДАННЫЕ","#BCD0F0"),
+            ("cache","НАШ КЭШ ПРЕВЬЮ","#9DC9FF"),
+        ]
+        for index,(key,caption,fg) in enumerate(cards):
+            card=tk.Frame(grid,bg="#17263C",padx=18,pady=10,
+                          highlightbackground="#2B405D",highlightthickness=1)
+            card.grid(row=index//2,column=index%2,sticky="nsew",padx=5,pady=5)
+            tk.Label(card,text=caption,bg="#17263C",fg="#9DB6D7",
+                     font=("Segoe UI",9,"bold")).pack(anchor="w")
+            lbl=tk.Label(card,text="…",bg="#17263C",fg=fg,
+                     font=("Segoe UI",17,"bold"),pady=4)
+            lbl.pack(anchor="w")
+            self.storage_labels[key]=lbl
+        self.storage_note=tk.Label(win,text="Проверяем файлы…",bg="#0D1626",
+                fg="#B7CDE8",justify="left",anchor="w",wraplength=715,
+                font=("Segoe UI",10),pady=9)
+        self.storage_note.pack(fill="x",padx=24,pady=(4,3))
+        actions=tk.Frame(win,bg="#0D1626")
+        actions.pack(fill="x",padx=16,pady=5)
+        self.btn(actions,"⟳  Проверить",self.refresh_storage_audit).pack(side="left",padx=4)
+        self.btn(actions,"✓  Штатная очистка",self.clear_official,True).pack(side="left",padx=4)
+        self.btn(actions,"✕  Старые сбои",self.delete_old_failed,palette="danger").pack(side="left",padx=4)
+        extras=tk.Frame(win,bg="#0D1626")
+        extras.pack(fill="x",padx=16,pady=(0,8))
+        self.btn(extras,"Очистить кэш миниатюр",self.clear_preview_cache).pack(side="left",padx=4)
+        self.btn(extras,"Открыть output",self.open_output).pack(side="left",padx=4)
+        self.btn(extras,"Закрыть",closing).pack(side="right",padx=4)
+        tk.Label(win,text="Важно: проверка ничего не удаляет. Штатная очистка выполняется самой FreeVideo.\n"
+                 "Старые неудачные папки удаляются только с отдельным двойным подтверждением.",
+                 bg="#0D1626",fg="#7898BA",justify="left",font=("Segoe UI",9),
+                 pady=10).pack(side="bottom",fill="x",padx=22)
+        self.paint_storage_dialog()
+        self.refresh_storage_audit()
+
+    def paint_storage_dialog(self):
+        if not self.disk_window or not self.disk_window.winfo_exists() or not getattr(self,"storage_labels",None):
+            return
+        state=self.disk_report or {}
+        if "error" in state:
+            self.storage_note.config(text="Ошибка сканирования: "+state["error"])
+            return
+        if not state:
+            self.storage_note.config(text="Анализируем папку FreeVideo…")
+            return
+        values={
+            "total":self.bytes_fmt(state["all_bytes"]),
+            "video":self.bytes_fmt(state["video_bytes"]),
+            "working":self.bytes_fmt(state["working_estimate"]),
+            "failed":f"{self.bytes_fmt(state['failed_bytes'])}  /  {state['failed_count']} папок",
+            "other":self.bytes_fmt(state["other_bytes"]),
+            "cache":self.bytes_fmt(self.own_thumbnail_size())
+        }
+        for key,value in values.items():self.storage_labels[key].config(text=value)
+        output=self.db.get("output","")
+        try:
+            space=shutil.disk_usage(root_dir(output))
+            suffix=f"\nСвободно на диске: {self.bytes_fmt(space.free)}"
+        except (OSError,ValueError):suffix=""
+        self.storage_note.config(
+            text="Это оценка по файлам. Только FreeVideo определяет, какие рабочие данные "
+                 "действительно можно безопасно очистить. Превью и файлы для продолжения "
+                 "видео защищены штатным механизмом."+suffix)
+
+    def open_output(self):
+        try:
+            folder=root_dir(self.db.get("output"))
+            if os.name=="nt":os.startfile(str(folder))
+            else:subprocess.Popen(["xdg-open",str(folder)])
+        except (OSError,ValueError) as exc:mb.showwarning("Output",str(exc),parent=self)
+
+    def clear_official(self):
+        try:
+            info=api_query(clean=False)
+        except ConnectionError as exc:
+            mb.showwarning("Штатная очистка FreeVideo",str(exc),parent=self.disk_window or self)
+            return
+        count=info.get("bytes",0)
+        if count<=0:
+            mb.showinfo("Готово","FreeVideo не обнаружила рабочих файлов для очистки.",parent=self.disk_window or self)
+            return
+        if not mb.askyesno("Очистка через FreeVideo",
+           f"FreeVideo (локальный порт {info['port']}) сообщает, что безопасно удалить:\n\n"
+           f"           {self.bytes_fmt(count)}\n\n"
+           "Это удалит только разрешённые FreeVideo промежуточные файлы "
+           "завершённых генераций. Готовые MP4 не затрагиваются.\n"
+           "Желательно дождаться окончания генераций.\n\n"
+           "Подтверждаешь?",parent=self.disk_window or self,icon="warning"):
+            return
+        self.status.config(text="●  FreeVideo очищает рабочие файлы…")
+        def worker():
+            try:
+                result=api_query(clean=True,ports=(info["port"],))
+            except (ConnectionError,OSError,ValueError) as exc:
+                result={"error":str(exc)}
+            def complete():
+                if "error" in result:
+                    mb.showwarning("Очистка не выполнена",result["error"],
+                                   parent=self.disk_window or self)
+                else:
+                    freed=self.bytes_fmt(result.get("freed_bytes",0))
+                    mb.showinfo("Очистка FreeVideo",
+                        f"Освобождено: {freed}\n"
+                        f"Файлов, которые не удалось удалить: {result.get('left',0)}",
+                        parent=self.disk_window or self)
+                    self.status.config(text=f"✓ FreeVideo освободила {freed}")
+                self.refresh_storage_audit()
+            try:self.after(0,complete)
+            except (RuntimeError,tk.TclError):pass
+        threading.Thread(target=worker,daemon=True).start()
+
+    def delete_old_failed(self):
+        state=self.disk_report or {}
+        if "failed" not in state or not state["failed"]:
+            mb.showinfo("Старые сбои","Нет старых завершённых ошибкой папок для удаления.",
+                parent=self.disk_window or self)
+            return
+        candidates=state["failed"]
+        amount=sum(row["bytes"] for row in candidates)
+        if not mb.askyesno("Старые неудачные генерации",
+            f"Папок со статусом failed/cancelled старше 24 часов: {len(candidates)}\n"
+            f"Размер: {self.bytes_fmt(amount)}\n\n"
+            "Они не содержат готового video.mp4.\n"
+            "Удаление будет НАВСЕГДА, без возможности восстановления через Корзину.\n"
+            "Активные генерации и папки с неизвестными файлами не затрагиваются.\n\n"
+            "Продолжить?",parent=self.disk_window or self,icon="warning"):
+            return
+        confirmation=sd.askstring("Подтверждение удаления",
+               "Для удаления старых неудачных папок введи УДАЛИТЬ:",
+               parent=self.disk_window or self)
+        if confirmation!="УДАЛИТЬ":return
+        deleted=0;freed=0;skipped=0
+        base=self.db.get("output","")
+        for row in candidates:
+            try:
+                folder=Path(row["path"])
+                size=eligible_failed(folder,base)
+                shutil.rmtree(folder)
+                deleted+=1;freed+=size
+            except (OSError,ValueError):skipped+=1
+        mb.showinfo("Очистка завершена",
+            f"Удалено старых папок: {deleted}\nОсвобождено: {self.bytes_fmt(freed)}\n"
+            f"Пропущено или защищено: {skipped}",parent=self.disk_window or self)
+        self.refresh_storage_audit()
+
+    def clear_preview_cache(self):
+        size=self.own_thumbnail_size()
+        if size<=0:
+            mb.showinfo("Кэш","Временных миниатюр приложения нет.",parent=self.disk_window or self)
+            return
+        if not mb.askyesno("Миниатюры приложения",
+           f"Удалить миниатюры нашего приложения размером {self.bytes_fmt(size)}?\n"
+           "Это не затрагивает исходные видео или прикреплённые вручную фотографии.\n"
+           "При необходимости кадры будут созданы заново.",parent=self.disk_window or self):
+            return
+        freed=0
+        if THUMBS.is_dir() and not _is_reparse(THUMBS):
+            for path in THUMBS.glob("*.jpg"):
+                try:
+                    if re.fullmatch(r"[0-9a-f]{28}\.jpg",path.name) and not _is_reparse(path):
+                        count=path.stat().st_size
+                        path.unlink()
+                        freed+=count
+                except OSError:pass
+        for row in self.db["items"].values():row.pop("generatedPreview",None)
+        self.persist()
+        if self.selected:self.show_gallery()
+        self.paint_storage_dialog()
+        self.status.config(text=f"✓  Очищен кэш превью: {self.bytes_fmt(freed)}")
+
     def delete_my_prompts(self):
         """Move imported and manually created prompts to a reversible local trash."""
         picked=list(self.tree.selection())
