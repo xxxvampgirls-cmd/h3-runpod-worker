@@ -65,7 +65,7 @@ class FreeVideoSafetyTests(unittest.TestCase):
             request={"assets":json.dumps(assets)}
             linked=linked_originals(output,request)
             self.assertEqual(len(linked),1)
-            self.assertEqual(linked[0]["path"],str(source))
+            self.assertEqual(Path(linked[0]["path"]).resolve(),source.resolve())
             self.assertTrue(linked[0]["exists"])
             self.assertEqual(linked[0]["role"],"first")
             self.assertFalse((root/"output"/"FreeVideo"/"original_photo.jpg").exists())
