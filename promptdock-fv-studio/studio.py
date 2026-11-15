@@ -1394,10 +1394,38 @@ class App(tk.Tk):
 
 if __name__=="__main__":
     if "--smoke-ui" in sys.argv:
-        # Windows CI checks actual Tk startup and widget geometry.
+        # Windows CI exercises real Tk startup, deletion of a user prompt and
+        # the Disk Control dialog. The runner is disposable.
+        import tempfile
         window=App()
-        window.update_idletasks()
-        window.update()
-        window.destroy()
+        try:
+            key="manual:smoke-"+uuid.uuid4().hex
+            window.db["items"][key]=dict(id=key,title="UI smoke prompt",
+                source="Мой",prompt="test",category="Мои",images=[],
+                createdAt=int(time.time()*1000))
+            window.fill()
+            window.tree.selection_set(key)
+            window.choose_item(None)
+            old=mb.askyesno
+            mb.askyesno=lambda *args,**kwargs:True
+            try:
+                window.delete_my_prompts()
+            finally:
+                mb.askyesno=old
+            assert key not in window.db["items"]
+            assert key in window.db.get("promptTrash",{}), "Own prompt deletion must be reversible"
+            window.db["promptTrash"].pop(key,None)
+            window.persist()
+            with tempfile.TemporaryDirectory() as tmp:
+                (Path(tmp)/"FreeVideo").mkdir()
+                window.db["output"]=tmp
+                window.open_storage()
+                window.update_idletasks()
+                window.update()
+                if window.disk_window:
+                    window.disk_window.destroy()
+                window.update()
+        finally:
+            window.destroy()
     else:
         App().mainloop()
