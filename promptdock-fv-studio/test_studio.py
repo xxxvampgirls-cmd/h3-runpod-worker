@@ -52,6 +52,20 @@ class FreeVideoSafetyTests(unittest.TestCase):
             info=inspect(str(base))
             self.assertEqual(info["working_estimate"],1024)
 
+    def test_saved_reference_images_preserved_and_detected(self):
+        from studio import run_reference_images,pics
+        with tempfile.TemporaryDirectory() as directory:
+            run=Path(directory)
+            for name in ("first.png","last.png","reference-00.png","reference-01.png"):
+                (run/name).write_bytes(b"sample-image")
+            (run/"reference-02.mp4").write_bytes(b"sample-video")
+            (run/"video.mp4").write_bytes(b"mp4")
+            refs=run_reference_images(run)
+            self.assertEqual(len(refs),4)
+            self.assertEqual([Path(p).name for p in refs],
+                ["first.png","last.png","reference-00.png","reference-01.png"])
+            self.assertEqual(len(pics({"sourceImages":refs})),4)
+
     def test_media_reads_all_five_with_strength(self):
         rows=[{"path":f"C:\\ComfyUI\\models\\loras\\lora-{i}.safetensors","strength":(i+1)*0.25}
               for i in range(5)]
