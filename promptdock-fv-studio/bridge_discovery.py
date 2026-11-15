@@ -38,10 +38,21 @@ def _direct_candidates(path):
 
 
 def normalize_custom_nodes(path):
-    """Return a verified existing custom_nodes folder, never create one."""
-    for p in _direct_candidates(path):
-        if p.name.casefold() == TARGET_NAME and _ordinary_directory(p):
-            return p
+    """Resolve only the selected location, never a neighbouring unrelated folder."""
+    try:
+        p = Path(path).expanduser()
+    except (TypeError, ValueError, OSError):
+        return None
+    candidates = [p, p/"custom_nodes",
+                  p/"ComfyUI"/"custom_nodes", p/"comfyui"/"custom_nodes",
+                  p/"FreeVideo-engine"/"ComfyUI"/"custom_nodes",
+                  p/"ComfyUI_windows_portable"/"ComfyUI"/"custom_nodes"]
+    # Selecting output/FreeVideo or a run folder should resolve its ComfyUI.
+    for parent in list(p.parents)[:5]:
+        candidates.append(parent/"custom_nodes")
+    for candidate in candidates:
+        if candidate.name.casefold() == TARGET_NAME and _ordinary_directory(candidate):
+            return candidate
     return None
 
 
