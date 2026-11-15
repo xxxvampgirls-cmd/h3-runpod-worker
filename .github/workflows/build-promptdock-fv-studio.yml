@@ -31,6 +31,11 @@ jobs:
         run: python promptdock-fv-studio/smoke_ui.py
       - name: Build standalone EXE
         run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name PromptDock-FreeVideo-Studio --collect-binaries imageio_ffmpeg --collect-all ffpyplayer --distpath dist --workpath tempbuild --specpath tempbuild promptdock-fv-studio/studio.py
+      - name: Test codecs from the actual packaged Windows executable
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath (Resolve-Path "dist/PromptDock-FreeVideo-Studio.exe") -ArgumentList "--smoke-codecs" -PassThru -Wait
+          if ($process.ExitCode -ne 0) { throw "Bundled FFmpeg and ffpyplayer smoke test failed with exit code $($process.ExitCode)" }
       - name: Upload executable
         uses: actions/upload-artifact@v4
         with:
