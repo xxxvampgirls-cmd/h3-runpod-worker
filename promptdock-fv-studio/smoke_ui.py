@@ -2,7 +2,7 @@
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
-from bridge_embedded import BRIDGE_JS,BRIDGE_PY
+from bridge_payloads import BRIDGE_JS,BRIDGE_INIT
 from studio import App
 
 def run():
@@ -13,11 +13,13 @@ def run():
         with tempfile.TemporaryDirectory() as tmp:
             nodes=Path(tmp)/"ComfyUI"/"custom_nodes"
             nodes.mkdir(parents=True)
-            with patch("tkinter.messagebox.showinfo",lambda *a,**kw:None):
-                if not app._install_bridge_to(nodes,parent=app):
-                    raise AssertionError("Bridge installation declined or failed")
+            with patch.object(app,"_choose_comfyui_nodes",return_value=nodes), \
+                 patch("tkinter.messagebox.showinfo",lambda *a,**kw:None), \
+                 patch("tkinter.messagebox.askyesno",return_value=True):
+                app.install_bridge()
             root=nodes/"promptdock_freevideo_bridge"
-            assert (root/"__init__.py").read_text(encoding="utf-8")==BRIDGE_PY
+            assert root.is_dir(),"No bridge installed"
+            assert (root/"__init__.py").read_text(encoding="utf-8")==BRIDGE_INIT
             assert (root/"web"/"bridge.js").read_text(encoding="utf-8")==BRIDGE_JS
             assert app.bridge_folder()==root
         # Smoke the real manual prompt removal without touching FreeVideo output.
