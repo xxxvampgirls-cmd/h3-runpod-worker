@@ -10,6 +10,46 @@ from studio import extract_loras, read_lora_details, from_freevideo, validate_de
 from cleanup import inspect, eligible_failed
 
 class FreeVideoSafetyTests(unittest.TestCase):
+    def test_embedded_bridge_payload(self):
+        from bridge_embedded import BRIDGE_JS, BRIDGE_PY
+        self.assertIn("PromptDock one-way local handoff",BRIDGE_PY)
+        self.assertIn("PromptDock.FreeVideoBridge",BRIDGE_JS)
+        self.assertIn("/promptdock-bridge/pending",BRIDGE_JS)
+        self.assertIn("/promptdock-bridge/ack",BRIDGE_PY)
+        self.assertGreater(len(BRIDGE_JS),2500)
+
+    def test_detect_custom_nodes_from_output_root(self):
+        from integration import nodes_from_choice,discover
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)/"FreeVideo-engine"/"ComfyUI"
+            nodes=root/"custom_nodes"
+            nodes.mkdir(parents=True)
+            output=root/"output"
+            (output/"FreeVideo").mkdir(parents=True)
+            matches=[str(p) for p in nodes_from_choice(output)]
+            self.assertIn(str(nodes),matches)
+            scanned=discover(output=str(output),limit_seconds=2,max_entries=400)
+            self.assertIn(str(nodes),scanned)
+
+    def test_cleanup_only_counts_finished_reclaimable_work(self):
+        from cleanup import inspect
+        with tempfile.TemporaryDirectory() as folder:
+            base=Path(folder)/"output"
+            run=base/"FreeVideo"/"2026-11-15"/("c"*32)
+            work=run/"video.artifacts"
+            work.mkdir(parents=True)
+            (run/"video.mp4").write_bytes(b"video")
+            (run/"comfy-request.json").write_text(json.dumps({"status":"complete"}))
+            (run/"video.request.json").write_text(json.dumps({"success":True,"preview":False}))
+            (work/"latents.pt").write_bytes(b"x"*2048)
+            (work/"rgb.npy").write_bytes(b"y"*1024)
+            info=inspect(str(base))
+            self.assertEqual(info["working_estimate"],3072)
+            self.assertEqual(info["video_bytes"],5)
+            (run/"video.request.json").write_text(json.dumps({"success":True,"preview":True}))
+            info=inspect(str(base))
+            self.assertEqual(info["working_estimate"],1024)
+
     def test_media_reads_all_five_with_strength(self):
         rows=[{"path":f"C:\\ComfyUI\\models\\loras\\lora-{i}.safetensors","strength":(i+1)*0.25}
               for i in range(5)]
