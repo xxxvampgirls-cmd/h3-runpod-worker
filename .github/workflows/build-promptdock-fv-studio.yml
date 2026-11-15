@@ -18,13 +18,15 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install build dependencies
-        run: python -m pip install --disable-pip-version-check Pillow pyinstaller send2trash
+        run: python -m pip install --disable-pip-version-check Pillow pyinstaller send2trash imageio-ffmpeg
       - name: Verify source syntax
         run: python -m py_compile promptdock-fv-studio/studio.py
       - name: Test FreeVideo LoRA scanning and safe folder selection
         run: python -m unittest discover -s promptdock-fv-studio -p "test_*.py" -v
+      - name: Check FreeVideo browser bridge syntax
+        run: node --check promptdock-fv-studio/bridge/web/bridge.js
       - name: Build standalone EXE
-        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name PromptDock-FreeVideo-Studio --distpath dist --workpath tempbuild --specpath tempbuild promptdock-fv-studio/studio.py
+        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name PromptDock-FreeVideo-Studio --add-data "promptdock-fv-studio/bridge;bridge" --distpath dist --workpath tempbuild --specpath tempbuild promptdock-fv-studio/studio.py
       - name: Upload executable
         uses: actions/upload-artifact@v4
         with:
