@@ -11,7 +11,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog as fd, messagebox as mb
 from send2trash import send2trash
-from lora_cache_cleaner import scan_parent, recycle_one, discover_parents, valid_cache_parent
+from lora_cache_cleaner import scan_parent, recycle_one, recycle_all_safe, discover_parents, valid_cache_parent
 
 BG="#0D1626"
 CARD="#192940"
@@ -33,6 +33,7 @@ class LoraCacheWindow(tk.Toplevel):
         self.minsize(870,590)
         self.configure(bg=BG)
         self.data={}
+        self.last_scan=None
         self.busy=False
         self.closed=False
         self.protocol("WM_DELETE_WINDOW",self.close)
@@ -84,7 +85,9 @@ class LoraCacheWindow(tk.Toplevel):
         self.details.pack(fill="x",padx=16,pady=(6,5))
         actions=tk.Frame(self,bg=BG,pady=8)
         actions.pack(fill="x",padx=16)
-        self.btn(actions,"→ Выбранное в Корзину Windows",self.recycle,primary=True).pack(side="left",padx=(0,8))
+        self.btn(actions,"⚡ Очистить ВСЕ безопасные",self.auto_cleanup,primary=True).pack(side="left",padx=(0,8))
+        self.btn(actions,"Выбранное в Корзину",self.recycle).pack(side="left",padx=(0,8))
+        self.btn(actions,"Почему остались?",self.explain_remaining).pack(side="left",padx=(0,8))
         self.btn(actions,"Открыть выбранную папку",self.reveal).pack(side="left",padx=3)
         self.btn(actions,"Закрыть",self.close).pack(side="right",padx=3)
         tk.Label(self,text="* Реально освобождаемое место рассчитано только по файлам без других жёстких ссылок. "
@@ -112,6 +115,7 @@ class LoraCacheWindow(tk.Toplevel):
             self.path.set(parent)
             self.summary.configure(text="Путь выбран. Нажми «Проверить», чтобы увидеть папки.")
             self.data={}
+            self.last_scan=None
             self.tree.delete(*self.tree.get_children())
 
     def locate(self):
@@ -189,26 +193,149 @@ class LoraCacheWindow(tk.Toplevel):
                 if error:
                     self.summary.config(text="Ошибка: "+error)
                     return
-                self.data={str(i):entry for i,entry in enumerate(result["rows"])}
-                self.tree.delete(*self.tree.get_children())
-                for key,row in self.data.items():
-                    seen=datetime.fromtimestamp(row["last_used"]).strftime("%d.%m.%Y %H:%M")
-                    self.tree.insert("",tk.END,iid=key,text=row["name"][:29],
-                         values=(gb(row["logical"]),gb(row["reclaimable"]),
-                                 gb(row["hardlinked"]),seen,row["status"]),
-                         tags=("safe",) if row["safe"] else ("new",))
-                self.summary.config(text=
-                     f"Проверено: {len(result['rows'])} папок. "
-                     f"Общий размер файлов: {gb(result['logical'])}. "
-                     f"Потенциально освободится при удалении допустимых папок: {gb(result['reclaimable'])}. "
-                     f"Защищено: {result['protected']}. "
-                     f"Неизвестных / неполных пропущено: {len(result['skipped'])}.")
-                self.details.config(text="Выдели одну или несколько строк для просмотра. "
-                                    "Свежеиспользованные кэши защищены от удаления.")
+                self.render_report(result)
             if not self.closed:
                 try:self.after(0,finish)
                 except (RuntimeError,tk.TclError):pass
         threading.Thread(target=worker,daemon=True,name="promptdock-lora-audit").start()
+
+
+    def render_report(self,result):
+        """UI updates only when the user pressed cleanup or scan."""
+        self.last_scan=result
+        self.data={str(i):entry for i,entry in enumerate(result["rows"])}
+        self.tree.delete(*self.tree.get_children())
+        for key,row in self.data.items():
+            seen=datetime.fromtimestamp(row["last_used"]).strftime("%d.%m.%Y %H:%M")
+            self.tree.insert("",tk.END,iid=key,text=row["name"][:29],
+                 values=(gb(row["logical"]),gb(row["reclaimable"]),
+                         gb(row["hardlinked"]),seen,row["status"]),
+                 tags=("safe",) if row["safe"] else ("new",))
+        self.summary.config(text=(
+             f"Кэшей: {len(result['rows'])}. "
+             f"Можно очистить: {result.get('eligible',sum(x['safe'] for x in result['rows']))}. "
+             f"Размер файлов: {gb(result['logical'])}. "
+             f"Оценка освобождения: {gb(result['reclaimable'])}. "
+             f"Недавних / защищённых: {result['protected']}. "
+             f"Неопознанных / неполных: {len(result['skipped'])}."))
+        self.details.config(text="Нажми «Почему остались?», чтобы увидеть причины. "
+                  "Фоновое сканирование отключено, ничего не удаляется без подтверждения.")
+
+    def explain_remaining(self):
+        """Show exact skipped names, avoiding an unexplained pile of old folders."""
+        data=self.last_scan
+        if data is None:
+            mb.showinfo("Кэш LoRA","Сначала нажми «Проверить».",parent=self)
+            return
+        protected=[x for x in data["rows"] if not x["safe"]]
+        unknown=data["skipped"]
+        win=tk.Toplevel(self)
+        win.title("Что осталось и почему")
+        win.geometry("950x580")
+        win.configure(bg=BG)
+        tk.Label(win,text="◈  ПОЧЕМУ ПАПКИ ОСТАЛИСЬ",bg=BG,fg=FG,
+                 font=("Segoe UI",17,"bold"),pady=14).pack(fill="x")
+        box=tk.Text(win,bg=CARD,fg="#DFECFF",relief="flat",
+                    font=("Consolas",10),wrap="word",padx=15,pady=12)
+        box.pack(fill="both",expand=True,padx=18,pady=10)
+        notes=[
+            f"Недавно использованные / защищённые: {len(protected)}",
+            f"Без полного подтверждённого manifest: {len(unknown)}",
+            "",
+            "ЭТИ ПАПКИ НЕ УДАЛЯЛИСЬ. ОСНОВНЫЕ МОДЕЛИ И LoRA НЕ ТРОГАЛИ.",
+            "Возможные причины: использовались менее суток назад, неполная",
+            "подготовка, неизвестные файлы, ссылка-junction, занятый файл.",
+            "",
+            "НЕДАВНИЕ (<24 часов):"]
+        notes.extend(f"• {x['name']} — {x['status']} ({gb(x['logical'])})"
+                     for x in protected[:200])
+        notes.extend(["","НЕОПОЗНАННЫЕ / НЕПОЛНЫЕ:"])
+        notes.extend(f"• {name}: {error}" for name,error in unknown[:200])
+        if not protected and not unknown:
+            notes.append("Защищённых папок нет.")
+        box.insert("1.0","\n".join(notes))
+        box.config(state="disabled")
+        self.btn(win,"Закрыть",win.destroy).pack(pady=12)
+
+    def auto_cleanup(self):
+        """One-click audit + user-confirmed recycle of ALL eligible variants."""
+        if self.busy:return
+        parent=self.path.get().strip()
+        if not valid_cache_parent(parent):
+            mb.showwarning("Кэш LoRA",
+                "Не найдена папка int8-convrot с кэшами. "
+                "Нажми «Найти» или укажи эту папку один раз.",
+                parent=self)
+            return
+        self.app.db["loraCacheRoot"]=parent
+        self.app.persist()
+        self.busy=True
+        self.summary.config(text="Проверяю ВСЕ папки кэша по твоему нажатию…")
+        def audit():
+            try:report=scan_parent(parent);error=None
+            except (OSError,ValueError) as exc:report=None;error=str(exc)
+            def confirm():
+                self.busy=False
+                if error:
+                    self.summary.config(text="Ошибка сканирования: "+error)
+                    return
+                self.render_report(report)
+                eligible=[x for x in report["rows"] if x["safe"]]
+                if not eligible:
+                    mb.showinfo("Автоочистка LoRA",
+                        f"Нет кэшей для безопасной очистки.\n"
+                        f"Недавно использованные: {report['protected']}\n"
+                        f"Неполные или неизвестные: {len(report['skipped'])}\n\n"
+                        "Нажми «Почему остались?» для подробностей.",parent=self)
+                    return
+                if not mb.askyesno("FreeVideo закрыт?",
+                    "Перед очисткой закрой FreeVideo и ComfyUI, дождись окончания генераций.\n\n"
+                    "Подтверждаешь, что оба приложения закрыты?",
+                    parent=self,icon="warning"):
+                    return
+                nominal=sum(x["logical"] for x in eligible)
+                reclaim=sum(x["reclaimable"] for x in eligible)
+                if not mb.askyesno("Очистить всё безопасное?",
+                    f"Найдено подходящих кэшей: {len(eligible)}\n"
+                    f"Размер файлов: {gb(nominal)}\n"
+                    f"Возможно освободится после очистки Корзины: {gb(reclaim)}\n\n"
+                    f"Защищённых: {report['protected']}\n"
+                    f"Неполных / неизвестных: {len(report['skipped'])}\n\n"
+                    "Отправить ВСЕ подходящие кэши в Корзину Windows?\n"
+                    "Оригинальные LoRA, основные модели и готовые видео не затрагиваются.\n"
+                    "При повторном использовании FreeVideo может пересоздать кэш.",
+                    parent=self,icon="warning"):
+                    return
+                self.busy=True
+                self.summary.config(text="Отправляю выбранные системой безопасные кэши в Корзину Windows…")
+                def work():
+                    try:result=recycle_all_safe(parent,send2trash);failure=None
+                    except (OSError,ValueError) as exc:result=None;failure=str(exc)
+                    def done():
+                        self.busy=False
+                        if failure:
+                            self.summary.config(text="Ошибка: "+failure)
+                            mb.showwarning("Очистка LoRA",failure,parent=self)
+                            return
+                        self.render_report(result["remaining"])
+                        msg=(f"В Корзину Windows перенесено: {len(result['moved'])} папок.\n"
+                             f"Размер файлов: {gb(result['moved_logical'])}\n"
+                             f"После очистки Корзины может освободиться: {gb(result['potential_bytes'])}\n"
+                             f"Осталось защищённых: {result['protected']}\n"
+                             f"Неполных или неизвестных: {len(result['skipped'])}\n"
+                             f"Не удалось переместить: {len(result['failed'])}\n\n"
+                             "Чтобы узнать, почему остались папки, нажми «Почему остались?».")
+                        mb.showinfo("Результат очистки LoRA",msg,parent=self)
+                    if not self.closed:
+                        try:self.after(0,done)
+                        except (RuntimeError,tk.TclError):pass
+                threading.Thread(target=work,daemon=True,
+                                 name="promptdock-lora-clean-once").start()
+            if not self.closed:
+                try:self.after(0,confirm)
+                except (RuntimeError,tk.TclError):pass
+        threading.Thread(target=audit,daemon=True,
+                         name="promptdock-lora-audit-once").start()
 
     def describe(self,event=None):
         rows=[self.data.get(x) for x in self.tree.selection()]
