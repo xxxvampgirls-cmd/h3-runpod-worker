@@ -299,7 +299,7 @@ class App(tk.Tk):
         self.disk_hint=tk.Label(hero,text="●  DISK SCAN READY",bg="#17313C",fg="#9AF1E3",
                  font=("Segoe UI",9,"bold"),padx=12,pady=8)
         self.disk_hint.pack(side="right",padx=(0,8))
-        tk.Label(hero,text="LOCAL / OFFLINE",bg="#25203C",fg="#CDBEFF",
+        tk.Label(hero,text="MANUAL • AUTO OFF",bg="#25203C",fg="#CDBEFF",
                  font=("Segoe UI",9,"bold"),padx=12,pady=8).pack(side="right",padx=(0,9))
         tk.Frame(self,bg="#7660E5",height=3).pack(fill="x",padx=8)
         top=tk.Frame(self,bg="#121e30",pady=9,padx=12);top.pack(fill="x",padx=8)
@@ -436,7 +436,7 @@ class App(tk.Tk):
         bar.pack(fill="x",side="bottom",pady=6)
         self.btn(bar,"＋ Фото",self.add_photo).pack(fill="x",pady=(0,5))
         self.btn(bar,"Удалить фото",self.del_photo).pack(fill="x")
-        self.status=tk.Label(self,text="●  STUDIO READY    •    FREEVIDEO / PROMPTS / LoRA / STORAGE",
+        self.status=tk.Label(self,text="●  РУЧНОЙ РЕЖИМ    •    FREEVIDEO / PROMPTS / LoRA / STORAGE",
             bg="#121e30",fg="#a9cfed",anchor="w",padx=16,pady=10,font=("Segoe UI",10))
         self.status.pack(fill="x")
 
