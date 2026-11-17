@@ -156,6 +156,50 @@ class FreeVideoSafetyTests(unittest.TestCase):
                 recycle_one(folder,cache,captures.append)
             self.assertEqual(len(captures),1)
 
+    def test_one_click_lora_cleanup_checks_all_and_preserves_models(self):
+        from lora_cache_cleaner import scan_parent, recycle_all_safe
+        import shutil
+        with tempfile.TemporaryDirectory() as root:
+            root=Path(root)
+            cache=root/"int8-convrot"
+            cache.mkdir()
+            model=root/"h3-model.safetensors"
+            model.write_bytes(b"model bytes")
+            old=time.time()-3*86400
+            for letter in "abc":
+                folder=cache/("vdn-online-lora-"+letter*24)
+                (folder/"lora").mkdir(parents=True)
+                if letter=="c":
+                    (folder/"unknown-data.txt").write_text("protect")
+                    continue
+                (folder/"lora"/"root.safetensors").write_bytes(b"adapter")
+                os.link(model,folder/"00.safetensors")
+                (folder/"manifest.json").write_text(json.dumps({
+                    "source_id":letter*64,
+                    "groups":[{"file":"00.safetensors"},
+                              {"file":"lora/root.safetensors"}],
+                    "lora_identity":{"adapters":[]},
+                    "online_lora":{"version":1}}))
+                for p in folder.rglob("*"):
+                    if p.is_file():os.utime(p,(old,old))
+            trash=root/"recycle-bin"
+            trash.mkdir()
+            def simulated_trash(value):
+                shutil.move(value,trash/Path(value).name)
+            result=recycle_all_safe(cache,simulated_trash)
+            self.assertEqual(len(result["moved"]),2)
+            self.assertEqual(len(result["remaining"]["skipped"]),1)
+            self.assertTrue(model.exists())
+            self.assertTrue((cache/("vdn-online-lora-"+"c"*24)).is_dir())
+            self.assertEqual(len(list(trash.iterdir())),2)
+
+    def test_cleaner_window_one_click_starts_from_explicit_open(self):
+        from lora_cache_ui import LoraCacheWindow
+        code=(Path(__file__).parent/"lora_cache_ui.py").read_text(encoding="utf-8")
+        self.assertIn("self.after(180,self.begin_one_click)",code)
+        self.assertIn("self.locate(then_cleanup=True)",code)
+        self.assertIn("self.auto_cleanup()",code)
+
     def test_lora_cache_protects_recent_variants(self):
         from lora_cache_cleaner import inspect_variant, recycle_one
         with tempfile.TemporaryDirectory() as root:
