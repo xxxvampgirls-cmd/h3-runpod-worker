@@ -15,6 +15,7 @@ from cleanup import inspect as inspect_storage, api_query, eligible_failed, reco
 from bridge_embedded import BRIDGE_PY, BRIDGE_JS
 from integration import discover as discover_comfyui, nodes_from_choice as resolve_custom_nodes
 from reference_links import linked_originals
+from lora_cache_ui import LoraCacheWindow
 
 ROOT=Path(os.environ.get("LOCALAPPDATA") or Path.home())/"PromptDock-FreeVideo-Studio"
 DB=ROOT/"library.json"
@@ -284,10 +285,8 @@ class App(tk.Tk):
         self.build();self.fill()
         self.protocol("WM_DELETE_WINDOW",self.quit_app)
         self.bind("<Control-s>",lambda e:self.save())
-        if self.db.get("output"):self.after(400,self.scan)
-        # Read-only background refresh: discover new FreeVideo outputs without a daemon.
-        self.after(120000,self.auto_scan)
-        self.after(30000,self.periodic_storage_audit)
+        # Fully manual mode. Disk scans never happen at startup or on a timer.
+        # Select a folder and click "Обновить" / "Проверить" to scan.
 
     def btn(self,parent,label,cmd,primary=False,palette=None):
         return PillButton(parent,text=label,command=cmd,primary=primary,palette=palette)
@@ -540,15 +539,14 @@ class App(tk.Tk):
         self.db["items"][key]=it;self.persist();self.group="Все";self.fill()
         self.selected=None;self.tree.selection_set(key);self.choose_item(None)
 
-    def auto_scan(self):
-        if self.db.get("output"):
-            try: self.scan()
-            except (OSError,ValueError): pass
-        if self.winfo_exists():self.after(120000,self.auto_scan)
-
     def pick_output(self):
         path=fd.askdirectory(title="Выбери output или output/FreeVideo",initialdir=self.db.get("output") or str(Path.home()))
-        if path:self.db["output"]=path;self.output_hint.config(text="◉  Каталог: "+path);self.persist();self.scan()
+        if path:
+            self.db["output"]=path
+            self.output_hint.config(text="◉  Каталог: "+path)
+            self.persist()
+            self.disk_report=None
+            self.status.config(text="✓ Папка выбрана. Нажми «Обновить» для поиска генераций.")
 
     def scan(self):
         folder=self.db.get("output")
@@ -841,7 +839,7 @@ class App(tk.Tk):
             return
         self.db["inputRoot"]=str(root)
         self.persist()
-        self.scan()
+        self.status.config(text="✓ Папка исходников выбрана. Нажми «Обновить» вручную.")
 
     def show_original_prompt(self):
         """Show the immutable text actually saved with the video."""
@@ -951,12 +949,6 @@ class App(tk.Tk):
         else:subprocess.Popen(["xdg-open",str(p.parent)])
 
     # Disk Cleaner is deliberately opt-in: periodic audits never delete files.
-    def periodic_storage_audit(self):
-        if self.db.get("output"):
-            self.refresh_storage_audit()
-        if self.winfo_exists():
-            self.after(600000,self.periodic_storage_audit)
-
     def refresh_storage_audit(self):
         if self.disk_scanning:
             return
@@ -1003,7 +995,6 @@ class App(tk.Tk):
             if not self.db.get("output"):return
         if self.disk_window and self.disk_window.winfo_exists():
             self.disk_window.lift()
-            self.refresh_storage_audit()
             return
         win=tk.Toplevel(self)
         self.disk_window=win
@@ -1022,7 +1013,7 @@ class App(tk.Tk):
             font=("Segoe UI",20,"bold")).pack(side="left")
         tk.Label(hero,text="SAFE  •  LOCAL",bg="#1D3D43",fg="#A2F4DF",
             font=("Segoe UI",9,"bold"),padx=11,pady=6).pack(side="right")
-        tk.Label(win,text="Контроль файлов FreeVideo  /  Автопроверка каждые 10 минут",
+        tk.Label(win,text="Контроль файлов FreeVideo  /  только ручная проверка",
             bg="#0D1626",fg="#A6B9D7",font=("Segoe UI",10)).pack(anchor="w",padx=28,pady=(6,12))
         grid=tk.Frame(win,bg="#0D1626")
         grid.pack(fill="x",padx=16)
@@ -1046,7 +1037,7 @@ class App(tk.Tk):
                      font=("Segoe UI",17,"bold"),pady=4)
             lbl.pack(anchor="w")
             self.storage_labels[key]=lbl
-        self.storage_note=tk.Label(win,text="Проверяем файлы…",bg="#0D1626",
+        self.storage_note=tk.Label(win,text="Нажми «Проверить» — автоматическое сканирование отключено.",bg="#0D1626",
                 fg="#B7CDE8",justify="left",anchor="w",wraplength=715,
                 font=("Segoe UI",10),pady=9)
         self.storage_note.pack(fill="x",padx=24,pady=(4,3))
@@ -1057,6 +1048,7 @@ class App(tk.Tk):
         self.btn(actions,"⊞  Неудачные генерации",self.delete_old_failed,palette="danger").pack(side="left",padx=4)
         extras=tk.Frame(win,bg="#0D1626")
         extras.pack(fill="x",padx=16,pady=(0,8))
+        self.btn(extras,"◈ Кэш LoRA",self.open_lora_cache,True).pack(side="left",padx=4)
         self.btn(extras,"Очистить кэш миниатюр",self.clear_preview_cache).pack(side="left",padx=4)
         self.btn(extras,"Открыть output",self.open_output).pack(side="left",padx=4)
         self.btn(extras,"Закрыть",closing).pack(side="right",padx=4)
@@ -1065,7 +1057,17 @@ class App(tk.Tk):
                  bg="#0D1626",fg="#7898BA",justify="left",font=("Segoe UI",9),
                  pady=10).pack(side="bottom",fill="x",padx=22)
         self.paint_storage_dialog()
-        self.refresh_storage_audit()
+
+    def open_lora_cache(self):
+        """Separate user-invoked analyzer for FreeVideo online LoRA variants."""
+        existing=getattr(self,"lora_window_ref",None)
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.lift()
+                    return
+            except tk.TclError:pass
+        self.lora_window_ref=LoraCacheWindow(self)
 
     def paint_storage_dialog(self):
         if not self.disk_window or not self.disk_window.winfo_exists() or not getattr(self,"storage_labels",None):
@@ -1075,7 +1077,7 @@ class App(tk.Tk):
             self.storage_note.config(text="Ошибка сканирования: "+state["error"])
             return
         if not state:
-            self.storage_note.config(text="Анализируем папку FreeVideo…")
+            self.storage_note.config(text="Автоматические проверки отключены. Нажми «Проверить» для анализа.")
             return
         values={
             "total":self.bytes_fmt(state["all_bytes"]),
@@ -1138,7 +1140,7 @@ class App(tk.Tk):
                         f"Файлов, которые не удалось удалить: {result.get('left',0)}",
                         parent=self.disk_window or self)
                     self.status.config(text=f"✓ FreeVideo освободила {freed}")
-                self.refresh_storage_audit()
+                self.storage_note.config(text="Очистка выполнена. Нажми «Проверить» для пересчёта.") if self.disk_window and self.disk_window.winfo_exists() else None
             try:self.after(0,complete)
             except (RuntimeError,tk.TclError):pass
         threading.Thread(target=worker,daemon=True).start()
@@ -1208,7 +1210,8 @@ class App(tk.Tk):
             f"Пропущено/защищено: {failed+len(skipped)}\n\n"
             "Место на диске может не освободиться, пока ты не очистишь Корзину Windows.",
             parent=self.disk_window or self)
-        self.refresh_storage_audit()
+        if self.disk_window and self.disk_window.winfo_exists():
+            self.storage_note.config(text="Папки перемещены в Корзину. Нажми «Проверить» для пересчёта.")
 
     def clear_preview_cache(self):
         size=self.own_thumbnail_size()
