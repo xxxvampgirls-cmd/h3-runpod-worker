@@ -53,7 +53,7 @@ class LoraCacheWindow(tk.Toplevel):
         self.btn(selector,"📁 Выбрать",self.choose).pack(side="left",padx=(0,5))
         self.btn(selector,"⌕ Найти",self.locate).pack(side="left",padx=(0,5))
         self.btn(selector,"⟳ Проверить",self.scan,primary=True).pack(side="left")
-        self.summary=tk.Label(self,text="Ничего не сканируется автоматически. Выбери папку и нажми «Проверить».",
+        self.summary=tk.Label(self,text="Проверка запускается при открытии чистилки по твоему нажатию.",
                               bg=BG,fg="#98CFEC",anchor="w",justify="left",
                               font=("Segoe UI",11),wraplength=1000,pady=11)
         self.summary.pack(fill="x",padx=19)
@@ -90,6 +90,9 @@ class LoraCacheWindow(tk.Toplevel):
         self.btn(actions,"Почему остались?",self.explain_remaining).pack(side="left",padx=(0,8))
         self.btn(actions,"Открыть выбранную папку",self.reveal).pack(side="left",padx=3)
         self.btn(actions,"Закрыть",self.close).pack(side="right",padx=3)
+        # This window is only created by a deliberate user click on the LoRA
+        # cleaner button. Kick off the one-time audit and ask for confirmation.
+        self.after(180,self.begin_one_click)
         tk.Label(self,text="* Реально освобождаемое место рассчитано только по файлам без других жёстких ссылок. "
                  "Пока Корзина Windows не очищена, место может не освободиться. "
                  "Недавние / неизвестные / используемые кэши защищены.",
@@ -118,7 +121,15 @@ class LoraCacheWindow(tk.Toplevel):
             self.last_scan=None
             self.tree.delete(*self.tree.get_children())
 
-    def locate(self):
+    def begin_one_click(self):
+        """Opening the cleaner is the user's explicit scan-and-clean intent."""
+        if self.closed or self.busy:return
+        if valid_cache_parent(self.path.get().strip()):
+            self.auto_cleanup()
+        else:
+            self.locate(then_cleanup=True)
+
+    def locate(self,then_cleanup=False):
         if self.busy:return
         hints=[self.app.db.get("output",""),self.app.db.get("customNodes",""),
                self.app.db.get("loraRoot",""),self.path.get()]
@@ -140,15 +151,16 @@ class LoraCacheWindow(tk.Toplevel):
                     return
                 if len(found)==1:
                     self.path.set(str(found[0]))
-                    self.summary.config(text="Найдена папка "+str(found[0])+". Нажми «Проверить».")
+                    self.summary.config(text="Найдена папка "+str(found[0]))
+                    if then_cleanup:self.auto_cleanup()
                     return
-                self.choose_found(found)
+                self.choose_found(found,then_cleanup=then_cleanup)
             if not self.closed:
                 try:self.after(0,done)
                 except (RuntimeError,tk.TclError):pass
         threading.Thread(target=work,daemon=True,name="promptdock-lora-discovery").start()
 
-    def choose_found(self,found):
+    def choose_found(self,found,then_cleanup=False):
         chooser=tk.Toplevel(self)
         chooser.title("Найденные кэши FreeVideo")
         chooser.geometry("830x360")
@@ -164,7 +176,10 @@ class LoraCacheWindow(tk.Toplevel):
             picked=listing.curselection()
             if picked:
                 self.path.set(listing.get(picked[0]))
-                self.summary.config(text="Папка найдена. Нажми «Проверить».")
+                self.summary.config(text="Папка найдена.")
+                chooser.destroy()
+                if then_cleanup:self.auto_cleanup()
+                return
             chooser.destroy()
         self.btn(chooser,"Выбрать папку",accept,True).pack(padx=17,pady=13)
         listing.bind("<Double-1>",lambda e:accept())
