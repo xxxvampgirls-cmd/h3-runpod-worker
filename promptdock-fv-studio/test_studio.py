@@ -118,6 +118,68 @@ class FreeVideoSafetyTests(unittest.TestCase):
                 ["first.png","last.png","reference-00.png","reference-01.png"])
             self.assertEqual(len(pics({"sourceImages":refs})),4)
 
+    def test_lora_cache_only_int8_convrot_and_hardlinks_not_source(self):
+        from lora_cache_cleaner import scan_parent, inspect_variant, recycle_one
+        with tempfile.TemporaryDirectory() as root:
+            cache=Path(root)/"int8-convrot"
+            cache.mkdir()
+            folder=cache/("vdn-online-lora-"+"b"*24)
+            (folder/"blocks").mkdir(parents=True)
+            (folder/"lora").mkdir()
+            source=Path(root)/"model-source"
+            source.write_bytes(b"shared base model weight")
+            os.link(source,folder/"blocks"/"00.safetensors")
+            adapter=folder/"lora"/"00.safetensors"
+            adapter.write_bytes(b"unique lora factors")
+            manifest=folder/"manifest.json"
+            manifest.write_text(json.dumps({"source_id":"b"*64,
+                "groups":[{"file":"blocks/00.safetensors"},
+                          {"file":"lora/00.safetensors"}],
+                "online_lora":{"version":1},
+                "lora_identity":{"adapters":[{"name":"skating.safetensors","strength":0.7}]}}))
+            old=time.time()-40*3600
+            for p in (folder/"blocks"/"00.safetensors",adapter,manifest):
+                os.utime(p,(old,old))
+            result=scan_parent(cache)
+            self.assertEqual(len(result["rows"]),1)
+            self.assertEqual(result["rows"][0]["hardlinked"],len(source.read_bytes()))
+            self.assertEqual(result["rows"][0]["reclaimable"],
+                             len(adapter.read_bytes())+manifest.stat().st_size)
+            self.assertTrue(result["rows"][0]["safe"])
+            captures=[]
+            recycle_one(folder,cache,captures.append)
+            self.assertEqual(captures,[str(folder)])
+            self.assertTrue(source.is_file())
+            self.assertTrue(adapter.is_file(),"Test captures call without mutating files")
+            (folder/"user-notes.txt").write_text("don't touch")
+            with self.assertRaises(ValueError):
+                recycle_one(folder,cache,captures.append)
+            self.assertEqual(len(captures),1)
+
+    def test_lora_cache_protects_recent_variants(self):
+        from lora_cache_cleaner import inspect_variant, recycle_one
+        with tempfile.TemporaryDirectory() as root:
+            cache=Path(root)/"int8-convrot"
+            cache.mkdir()
+            folder=cache/("vdn-online-lora-"+"f"*24)
+            folder.mkdir()
+            (folder/"manifest.json").write_text(json.dumps({
+                "source_id":"f"*64,"groups":[],
+                "online_lora":{},"lora_identity":{"adapters":[]}}))
+            row=inspect_variant(folder,cache)
+            self.assertFalse(row["safe"])
+            sent=[]
+            with self.assertRaises(ValueError):
+                recycle_one(folder,cache,sent.append)
+            self.assertEqual(sent,[])
+
+    def test_manual_only_no_scheduled_disk_refresh(self):
+        code=(Path(__file__).parent/"studio.py").read_text(encoding="utf-8")
+        self.assertNotIn("self.after(120000,self.auto_scan)",code)
+        self.assertNotIn("self.after(30000,self.periodic_storage_audit)",code)
+        self.assertNotIn("self.after(400,self.scan)",code)
+        self.assertIn("self.open_lora_cache",code)
+
     def test_media_reads_all_five_with_strength(self):
         rows=[{"path":f"C:\\ComfyUI\\models\\loras\\lora-{i}.safetensors","strength":(i+1)*0.25}
               for i in range(5)]
