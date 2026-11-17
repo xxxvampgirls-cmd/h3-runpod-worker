@@ -50,7 +50,7 @@ def valid_cache_parent(path):
     """Only direct parents of official online LoRA variants, never root drives."""
     path=Path(path).expanduser()
     if not normal_dir(path):return False
-    if path.name.casefold() not in ("cache","int8-convert","fp8-convert","int8","fp8"):
+    if path.name.casefold() not in ("cache","int8-convert","fp8-convert","int8-convrot","fp8-convrot","int8","fp8"):
         return False
     if path.parent==path or not normal_dir(path.parent):return False
     return True
@@ -161,7 +161,7 @@ def inspect_variant(folder, parent=None, *, now=None, min_hours=STABLE_HOURS):
 def scan_parent(parent, *, now=None, min_hours=STABLE_HOURS):
     parent=Path(parent).expanduser()
     if not valid_cache_parent(parent):
-        raise ValueError("Выбери папку int8-convert, fp8-convert или cache с vdn-online-lora-*")
+        raise ValueError("Выбери папку int8-convrot, int8-convert, fp8-convert или cache с vdn-online-lora-*")
     rows=[]
     skipped=[]
     for child in parent.iterdir():
@@ -189,7 +189,7 @@ def recycle_one(folder,parent,trash, *, now=None):
 def discover_parents(hints=(), *, max_dirs=2800, seconds=8):
     """Bounded search by known FreeVideo names, not a full disk traversal."""
     deadline=time.monotonic()+seconds
-    targets={"cache","int8-convert","fp8-convert"}
+    targets={"cache","int8-convert","fp8-convert","int8-convrot","fp8-convrot"}
     interest=("freevideo","mini","engine","models","vdn","h3","int8","fp8",
               "cache","prepared","convert","data","working","comfyui")
     starters=[]
