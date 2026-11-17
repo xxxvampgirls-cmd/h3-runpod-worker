@@ -238,7 +238,7 @@ def discover_parents(hints=(), *, max_dirs=2800, seconds=8):
     deadline=time.monotonic()+seconds
     targets={"cache","int8-convert","fp8-convert","int8-convrot","fp8-convrot"}
     interest=("freevideo","mini","engine","models","vdn","h3","int8","fp8",
-              "cache","prepared","convert","data","working","comfyui")
+              "cache","prepared","convert","data","working","comfyui","edge","config")
     starters=[]
     def add(value):
         if not value:return
