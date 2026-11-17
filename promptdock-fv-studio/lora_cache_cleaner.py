@@ -49,7 +49,8 @@ def normal_file(path):
 def valid_cache_parent(path):
     """Only direct parents of official online LoRA variants, never root drives."""
     path=Path(path).expanduser()
-    if not normal_dir(path):return False
+    # Check ALL ancestors too: never remove caches accessed through junctions.
+    if any(not normal_dir(part) for part in (path,*path.parents)):return False
     if path.name.casefold() not in ("cache","int8-convert","fp8-convert","int8-convrot","fp8-convrot","int8","fp8"):
         return False
     if path.parent==path or not normal_dir(path.parent):return False
@@ -106,7 +107,21 @@ def inspect_variant(folder, parent=None, *, now=None, min_hours=STABLE_HOURS):
          or not NAME.fullmatch(folder.name) or not normal_dir(folder)):
         raise ValueError("Это не защищённая папка подготовленного кэша LoRA")
     doc=_read_manifest(folder)
-    if doc is None:raise ValueError("Нет корректного manifest.json этой комбинации LoRA")
+    if doc is None:
+        # An old completely EMPTY interrupted cache folder is harmless
+        # and may also go to the Recycle Bin. Any data inside is protected.
+        try: children=list(folder.iterdir())
+        except OSError:children=[None]
+        if children:
+            raise ValueError("Нет корректного manifest.json; возможно, неполный кэш")
+        info=_stat(folder)
+        if info is None:raise ValueError("Недоступная папка")
+        age_hours=(now-info.st_mtime)/3600
+        return dict(path=str(folder),name=folder.name,logical=0,reclaimable=0,
+            hardlinked=0,last_used=info.st_mtime,age_hours=age_hours,
+            idle_days=max(0,age_hours/24),status=("старая пустая папка" if
+            age_hours>=min_hours else "новая пустая / защищена"),
+            safe=age_hours>=min_hours,files=0,adapters=[],empty=True)
     names=_listed_files(doc)
     if not names:raise ValueError("Недопустимые пути в manifest.json")
     actual=set()
@@ -155,7 +170,8 @@ def inspect_variant(folder, parent=None, *, now=None, min_hours=STABLE_HOURS):
     return dict(path=str(folder),name=folder.name,logical=total,
                 reclaimable=reclaim,hardlinked=shared,last_used=newest_manifest,
                 age_hours=age_hours,idle_days=idle_days,status=status,
-                safe=age_hours>=min_hours,files=len(actual),adapters=display)
+                safe=age_hours>=min_hours,files=len(actual),adapters=display,
+                empty=False)
 
 
 def scan_parent(parent, *, now=None, min_hours=STABLE_HOURS):
@@ -174,7 +190,9 @@ def scan_parent(parent, *, now=None, min_hours=STABLE_HOURS):
     return dict(path=str(parent),rows=rows,skipped=skipped,
                 logical=sum(x["logical"] for x in rows),
                 reclaimable=sum(x["reclaimable"] for x in rows if x["safe"]),
-                protected=sum(not x["safe"] for x in rows))
+                protected=sum(not x["safe"] for x in rows),
+                eligible=sum(x["safe"] for x in rows),
+                empty=sum(x.get("empty",False) for x in rows))
 
 
 def recycle_one(folder,parent,trash, *, now=None):
@@ -184,6 +202,35 @@ def recycle_one(folder,parent,trash, *, now=None):
         raise ValueError("Кэш использовался менее 24 часов назад; оставлен")
     trash(str(Path(record["path"])))
     return record
+
+
+def recycle_all_safe(parent, trash, *, now=None, progress=None):
+    """Single user-confirmed bulk cleanup. Revalidate every path before recycle.
+
+    Does NOT run by itself or in the background; the UI calls it only when
+    the user presses 'Очистить всё безопасное' and confirms.
+    After cleaning, return diagnostics for the remaining protected caches.
+    """
+    initial=scan_parent(parent,now=now)
+    moved=[]
+    failed=[]
+    for row in initial["rows"]:
+        if not row["safe"]:
+            continue
+        try:
+            item=recycle_one(row["path"],parent,trash,now=now)
+            moved.append(item)
+        except (ValueError,OSError,PermissionError) as exc:
+            failed.append((row["name"],str(exc)))
+        if progress is not None:
+            try:progress(len(moved),len(failed))
+            except Exception:pass
+    remaining=scan_parent(parent,now=now)
+    return dict(moved=moved,failed=failed,remaining=remaining,
+         moved_logical=sum(x["logical"] for x in moved),
+         potential_bytes=sum(x["reclaimable"] for x in moved),
+         protected=len([x for x in remaining["rows"] if not x["safe"]]),
+         skipped=remaining["skipped"])
 
 
 def discover_parents(hints=(), *, max_dirs=2800, seconds=8):
