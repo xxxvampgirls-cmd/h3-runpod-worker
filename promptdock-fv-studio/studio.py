@@ -258,7 +258,9 @@ def pics(row):
     out=[]
     for item in [row.get("preview",""),row.get("generatedPreview",""),
                  *[r["path"] for r in row.get("sourceOriginals",[]) if r.get("exists") and r.get("kind")=="изображение"],
-                 *row.get("sourceImages",[]),*row.get("images",[])]:
+                 *row.get("sourceImages",[]),*row.get("images",[]),
+                 *[x.get("destination","") for x in row.get("imageExports",[])
+                   if isinstance(x,dict)]]:
         if not item:continue
         p=Path(item)
         if p.is_file() and not p.is_symlink() and p.suffix.lower() in PIC and p not in out:out.append(p)
