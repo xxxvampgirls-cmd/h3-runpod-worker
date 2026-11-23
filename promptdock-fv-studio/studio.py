@@ -910,6 +910,14 @@ class App(tk.Tk):
         hint.pack(fill="x",padx=18,pady=(0,8))
         items=[]
         activity={"busy":False}
+        def close_dialog():
+            if activity["busy"]:
+                mb.showinfo("Перенос фотографий",
+                    "Дождись окончания переноса или копирования, чтобы новые пути "
+                    "успели сохраниться в библиотеке.",parent=win)
+                return
+            win.destroy()
+        win.protocol("WM_DELETE_WINDOW",close_dialog)
 
         def display_rows():
             nonlocal items
@@ -1046,7 +1054,7 @@ class App(tk.Tk):
                 return
             folder=fd.askdirectory(title=("Куда переместить оригиналы?" if move else
                             "Куда скопировать оригиналы?"),parent=win,
-                            initialdir=str(Path.home()))
+                            initialdir=str(self.db.get("lastImageExportDir") or Path.home()))
             if not folder:return
             if move:
                 message=(f"Переместить {len(eligible)} оригинальных изображений в:\n{folder}\n\n"
@@ -1081,6 +1089,7 @@ class App(tk.Tk):
                     if succeeded:
                         history=row.setdefault("imageExports",[])
                         history.extend(succeeded)
+                        self.db["lastImageExportDir"]=str(folder)
                         self.persist()
                         display_rows()
                         if self.selected in self.db["items"]:
@@ -1110,7 +1119,7 @@ class App(tk.Tk):
                 ("Открыть папку",reveal,False),
                 ("Копировать путь",copy_path,False)):
             self.btn(bar,label,cmd,primary).pack(side="left",padx=3)
-        self.btn(bar,"Закрыть",win.destroy).pack(side="right",padx=3)
+        self.btn(bar,"Закрыть",close_dialog).pack(side="right",padx=3)
         display_rows()
         if items:tr.selection_set("0")
         else:
