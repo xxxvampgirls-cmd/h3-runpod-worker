@@ -20,7 +20,7 @@ jobs:
       - name: Install build dependencies
         run: python -m pip install --disable-pip-version-check Pillow pyinstaller send2trash imageio-ffmpeg ffpyplayer==4.5.4
       - name: Verify source syntax
-        run: python -m py_compile promptdock-fv-studio/studio.py promptdock-fv-studio/reference_links.py promptdock-fv-studio/studio_player.py promptdock-fv-studio/cleanup.py
+        run: python -m py_compile promptdock-fv-studio/studio.py promptdock-fv-studio/reference_links.py promptdock-fv-studio/studio_player.py promptdock-fv-studio/cleanup.py promptdock-fv-studio/image_transfer.py
       - name: Test FreeVideo LoRA scanning and safe folder selection
         run: python promptdock-fv-studio/test_studio.py -v
       - name: Validate actual Windows GUI startup
