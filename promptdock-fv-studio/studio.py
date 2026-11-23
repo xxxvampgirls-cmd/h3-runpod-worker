@@ -15,6 +15,7 @@ from cleanup import inspect as inspect_storage, api_query, eligible_failed, reco
 from bridge_embedded import BRIDGE_PY, BRIDGE_JS
 from integration import discover as discover_comfyui, nodes_from_choice as resolve_custom_nodes
 from reference_links import linked_originals
+from image_transfer import transfer_image, IMAGE_EXT as TRANSFER_IMAGE_EXT
 from lora_cache_ui import LoraCacheWindow
 
 ROOT=Path(os.environ.get("LOCALAPPDATA") or Path.home())/"PromptDock-FreeVideo-Studio"
@@ -24,7 +25,7 @@ THUMBS=ROOT/"thumbnails"
 BRIDGE_NAME="promptdock_freevideo_bridge"
 def package_bridge_path():
     return Path(getattr(sys,"_MEIPASS",Path(__file__).parent))/"bridge"
-PIC={".png",".jpg",".jpeg",".webp",".gif"}
+PIC={".png",".jpg",".jpeg",".webp",".gif",".bmp",".tif",".tiff"}
 
 def load_json(path, limit=8_000_000):
     try:
@@ -867,79 +868,252 @@ class App(tk.Tk):
         self.btn(bar,"Закрыть",win.destroy).pack(side="right")
 
     def show_originals(self):
-        """Show verified references without duplicating or modifying any image."""
+        """View, copy or explicitly move actual original pictures and saved run frames.
+
+        Original paths in FreeVideo workflow are never changed; exported files
+        are tracked in Studio's persistent library independently of its scan.
+        """
         if not self.selected:return
-        row=self.db["items"][self.selected]
-        originals=row.get("sourceOriginals",[])
-        copies=row.get("sourceImages",[])
+        row=self.db["items"].get(self.selected)
+        if not row:return
         win=tk.Toplevel(self,bg="#101B2D")
-        win.title("Файлы исходников • " + row.get("title",""))
-        win.geometry("900x550")
-        tk.Label(win,text="ИЗОБРАЖЕНИЯ И ИСХОДНЫЕ ФАЙЛЫ",bg="#101B2D",fg="#E2EBFC",
-                 font=("Segoe UI",15,"bold")).pack(anchor="w",padx=18,pady=(18,7))
-        tk.Label(win,text="Ссылки на файлы FreeVideo, без копирования. «Нет» означает, что исходник по сохранённому пути отсутствует.",
-                 bg="#101B2D",fg="#9DB5D1",font=("Segoe UI",9),wraplength=820).pack(anchor="w",padx=18)
-        rows=[{"name":x.get("name","?"),"role":x.get("role","референс"),
-               "path":x.get("path",""),"note":"Оригинал" if x.get("exists") else "Нет на диске"}
-              for x in originals]
-        rows += [{"name":Path(x).name,"role":"референс генерации","path":x,"note":"Копия генерации"}
-                 for x in copies]
-        area=tk.Frame(win,bg="#101B2D");area.pack(fill="both",expand=True,padx=18,pady=12)
-        tr=ttk.Treeview(area,columns=("role","status","path"),show="tree headings",height=10)
-        for key,title,width in (("#0","Файл",180),("role","Роль",120),("status","Тип",140),("path","Расположение",410)):
-            tr.heading(key,text=title);tr.column(key,width=width,minwidth=90)
+        win.title("Оригиналы • изображения FreeVideo / архив")
+        win.geometry("1050x675")
+        win.minsize(830,560)
+        win.transient(self)
+        tk.Label(win,text="◈  ОРИГИНАЛЬНЫЕ ФОТОГРАФИИ",bg="#101B2D",fg="#E2EBFC",
+                 font=("Segoe UI",17,"bold")).pack(anchor="w",padx=20,pady=(17,5))
+        tk.Label(win,text="Оригиналы из ComfyUI/input • кадры генерации • перенесённые и сохранённые копии",
+                 bg="#101B2D",fg="#A8CBEF",font=("Segoe UI",10)).pack(anchor="w",padx=20,pady=(0,4))
+        tk.Label(win,text="Ctrl / Shift — несколько файлов. Копирование не меняет оригинал. "
+                 "Перемещение отправляет старый файл в Корзину Windows, сохраняя "
+                 "новое расположение в Studio.",
+                 bg="#101B2D",fg="#9CB7D3",font=("Segoe UI",9),
+                 wraplength=960,justify="left").pack(anchor="w",padx=20)
+        area=tk.Frame(win,bg="#101B2D")
+        area.pack(fill="both",expand=True,padx=18,pady=(14,6))
+        tr=ttk.Treeview(area,columns=("role","status","path"),
+                        show="tree headings",height=11,selectmode="extended")
+        for key,title,width in (("#0","Файл",185),("role","Назначение",158),
+                                ("status","Статус",170),("path","Расположение",460)):
+            tr.heading(key,text=title)
+            tr.column(key,width=width,minwidth=85)
         tr.pack(side="left",fill="both",expand=True)
         scroll=ttk.Scrollbar(area,command=tr.yview)
-        scroll.pack(side="right",fill="y");tr.configure(yscrollcommand=scroll.set)
-        for i,item in enumerate(rows):
-            tr.insert("",tk.END,iid=str(i),text=item["name"],
-                     values=(item["role"],item["note"],item["path"]))
+        scroll.pack(side="right",fill="y")
+        tr.configure(yscrollcommand=scroll.set)
+        hint=tk.Label(win,text="Выдели изображения, затем выбери «Копировать в…» или «Переместить в…».",
+                bg="#182B45",fg="#D2E6FA",font=("Segoe UI",10),
+                anchor="w",wraplength=995,padx=14,pady=10)
+        hint.pack(fill="x",padx=18,pady=(0,8))
+        items=[]
+        activity={"busy":False}
+
+        def display_rows():
+            nonlocal items
+            items=[]
+            tr.delete(*tr.get_children())
+            # A FreeVideo input link is still the original path even if a
+            # user later relocated its bytes. Keep that history explicit.
+            exported=row.get("imageExports",[])
+            moved_originals={str(x.get("original","")):x for x in exported
+                             if isinstance(x,dict) and x.get("operation")=="move"}
+            for x in row.get("sourceOriginals",[]):
+                if not isinstance(x,dict):continue
+                original=str(x.get("path",""))
+                if not original:continue
+                still=Path(original).is_file()
+                status=("Оригинал" if still else
+                        "Перенесён • см. архив" if original in moved_originals else
+                        "Оригинал не найден")
+                items.append(dict(name=x.get("name") or Path(original).name,
+                                  role=x.get("role") or "Референс",
+                                  path=original,note=status,
+                                  category="original",move_allowed=True,
+                                  exists=still))
+            for x in row.get("sourceImages",[]):
+                p=Path(x)
+                items.append(dict(name=p.name,role="Сохранённый кадр",
+                                  path=str(p),note=("Копия FreeVideo" if p.is_file()
+                                      else "Кадр отсутствует"),
+                                  category="snapshot",move_allowed=False,
+                                  exists=p.is_file()))
+            # Imported manually attached pictures are also accessible, but
+            # cannot be moved from the app's own library directory.
+            for x in row.get("images",[]):
+                p=Path(x)
+                items.append(dict(name=p.name,role="Моё изображение",
+                                  path=str(p),note=("В библиотеке" if p.is_file()
+                                      else "Не найдено"),
+                                  category="library",move_allowed=False,
+                                  exists=p.is_file()))
+            for x in exported:
+                if not isinstance(x,dict):continue
+                p=Path(str(x.get("destination") or ""))
+                if not p.name:continue
+                items.append(dict(name=p.name,role="Экспорт из Studio",
+                                  path=str(p),
+                                  note=("Перемещённый оригинал" if x.get("operation")=="move"
+                                        else "Сохранённая копия") if p.is_file()
+                                        else "Архивный файл не найден",
+                                  category="export",move_allowed=True,
+                                  exists=p.is_file()))
+            for i,item in enumerate(items):
+                tr.insert("",tk.END,iid=str(i),text=item["name"],
+                          values=(item["role"],item["note"],item["path"]))
+            hint.config(text=(f"Доступно файлов и записей: {len(items)}. "
+                              "Выдели один или несколько через Ctrl / Shift."))
+
+        def selected():
+            return [items[int(k)] for k in tr.selection() if k.isdigit()
+                    and int(k)<len(items)]
+
         def selected_path():
-            keys=tr.selection()
-            return Path(rows[int(keys[0])]["path"]) if keys else None
+            rows=selected()
+            if not rows:return None
+            return Path(rows[0]["path"])
+
         def copy_path():
-            p=selected_path()
-            if p:
-                win.clipboard_clear();win.clipboard_append(str(p))
+            path=selected_path()
+            if path:
+                win.clipboard_clear()
+                win.clipboard_append(str(path))
+                hint.config(text="✓ Путь скопирован в буфер обмена Windows.")
+
         def reveal():
-            p=selected_path()
-            if not p:return
-            if not p.is_file():
-                mb.showwarning("Исходник","Файл больше не существует по этому пути.",parent=win)
+            path=selected_path()
+            if path is None:return
+            if not path.is_file():
+                mb.showwarning("Исходник","Файл отсутствует по указанному пути.",parent=win)
                 return
             try:
                 if os.name=="nt":
-                    subprocess.Popen(["explorer.exe","/select,",str(p)])
+                    subprocess.Popen(["explorer.exe","/select,",str(path)])
                 else:
-                    subprocess.Popen(["xdg-open",str(p.parent)])
-            except OSError as exc:mb.showwarning("Папка",str(exc),parent=win)
+                    subprocess.Popen(["xdg-open",str(path.parent)])
+            except OSError as exc:
+                mb.showwarning("Папка",str(exc),parent=win)
+
         def view():
-            p=selected_path()
-            if not p or not p.is_file():
-                mb.showwarning("Исходник","Файл не найден.",parent=win);return
-            if p.suffix.lower() not in PIC:
-                mb.showinfo("Просмотр","Это не изображение. Используй «Открыть папку».",parent=win);return
+            path=selected_path()
+            if path is None or not path.is_file():
+                mb.showwarning("Исходник","Файл не найден.",parent=win)
+                return
+            if path.suffix.lower() not in TRANSFER_IMAGE_EXT:
+                mb.showinfo("Просмотр","Это не фотография. Используй «Открыть папку».",
+                            parent=win)
+                return
             popup=tk.Toplevel(win,bg="#0B1523")
-            popup.title(p.name);popup.geometry("900x720")
-            image_label=tk.Label(popup,bg="#0B1523");image_label.pack(fill="both",expand=True,padx=12,pady=12)
+            popup.title(path.name)
+            popup.geometry("900x710")
+            image_label=tk.Label(popup,bg="#0B1523")
+            image_label.pack(fill="both",expand=True,padx=12,pady=12)
             try:
-                with Image.open(p) as original:
+                with Image.open(path) as original:
                     original.thumbnail((850,650))
                     photo=ImageTk.PhotoImage(original.convert("RGB"))
-                image_label.configure(image=photo);image_label.image=photo
+                image_label.configure(image=photo)
+                image_label.image=photo
             except (OSError,ValueError):
                 popup.destroy()
                 mb.showwarning("Просмотр","Не удалось прочитать изображение.",parent=win)
+
+        def export_images(move=False):
+            if activity["busy"]:return
+            rows=selected()
+            if not rows:
+                mb.showinfo("Изображения","Выдели хотя бы одно изображение.",parent=win)
+                return
+            eligible=[x for x in rows if x.get("exists")
+                      and Path(x["path"]).suffix.lower() in TRANSFER_IMAGE_EXT]
+            if move:
+                ineligible=[x for x in eligible if not x.get("move_allowed")]
+                if ineligible:
+                    mb.showwarning("Защищённые кадры",
+                       "Кадры генерации и фотографии из внутренней библиотеки Studio "
+                       "можно КОПИРОВАТЬ, но нельзя переносить: FreeVideo и Studio "
+                       "могут использовать их по существующим путям.\n\n"
+                       "Для переноса выбери оригиналы из ComfyUI/input или "
+                       "уже экспортированные файлы.",
+                       parent=win)
+                    return
+            if not eligible:
+                mb.showwarning("Нет изображений",
+                    "Выбранные файлы отсутствуют или не являются фотографиями.",
+                    parent=win)
+                return
+            folder=fd.askdirectory(title=("Куда переместить оригиналы?" if move else
+                            "Куда скопировать оригиналы?"),parent=win,
+                            initialdir=str(Path.home()))
+            if not folder:return
+            if move:
+                message=(f"Переместить {len(eligible)} оригинальных изображений в:\n{folder}\n\n"
+                    "Сначала будут созданы и проверены копии в новой папке, "
+                    "затем старые файлы попадут в Корзину Windows.\n\n"
+                    "ВАЖНО: FreeVideo продолжит помнить СТАРЫЕ пути к фотографиям! "
+                    "Для повторного запуска старого задания может потребоваться "
+                    "вернуть их из Корзины или выбрать новое расположение вручную.\n\n"
+                    "Генерации в FreeVideo должны быть завершены. Продолжить?")
+            else:
+                message=(f"Скопировать {len(eligible)} изображений в:\n{folder}\n\n"
+                    "Оригинальные файлы останутся на месте. "
+                    "Существующие файлы не будут перезаписаны.")
+            if not mb.askyesno("Перенос оригиналов" if move else "Копирование оригиналов",
+                               message,parent=win,icon="warning" if move else "question"):
+                return
+            activity["busy"]=True
+            hint.config(text=("Перемещаю" if move else "Копирую")+
+                              f" {len(eligible)} файлов…")
+            def work():
+                succeeded=[]
+                errors=[]
+                for item in eligible:
+                    try:
+                        out=transfer_image(item["path"],folder,move=move,
+                                           trash=send2trash if move else None)
+                        succeeded.append(out)
+                    except (OSError,ValueError,PermissionError) as exc:
+                        errors.append(f"{item['name']}: {exc}")
+                def done():
+                    activity["busy"]=False
+                    if succeeded:
+                        history=row.setdefault("imageExports",[])
+                        history.extend(succeeded)
+                        self.persist()
+                        display_rows()
+                        if self.selected in self.db["items"]:
+                            self.show_gallery()
+                    count_moved=sum(x["operation"]=="move" for x in succeeded)
+                    count_copied=sum(x["operation"]=="copy" for x in succeeded)
+                    warnings=[x["warning"] for x in succeeded if x.get("warning")]
+                    summary=(f"Скопировано: {count_copied}.\n"
+                             f"Перемещено: {count_moved}.\n"
+                             "Все новые пути сохранены в библиотеке Studio.\n"
+                             "Старые файлы после переноса находятся в Корзине Windows.")
+                    if warnings:summary+="\n\nПредупреждения:\n"+"\n".join(warnings[:5])
+                    if errors:summary+="\n\nНе удалось:\n"+"\n".join(errors[:7])
+                    mb.showinfo("Готово" if not errors else "Завершено с замечаниями",
+                                summary,parent=win)
+                try:self.after(0,done)
+                except (RuntimeError,tk.TclError):pass
+            threading.Thread(target=work,daemon=True,name="promptdock-export-originals").start()
+
         tr.bind("<Double-1>",lambda e:view())
-        bar=tk.Frame(win,bg="#101B2D");bar.pack(fill="x",padx=18,pady=(0,15))
-        for label,cmd in (("Посмотреть",view),("Открыть папку",reveal),
-                          ("Копировать путь",copy_path),("Закрыть",win.destroy)):
-            self.btn(bar,label,cmd).pack(side="left",padx=4)
-        if not rows:
-            mb.showinfo("Сохранённые источники",
-                "В данных генерации нет явной ссылки на исходный файл. "
-                "Программа не будет угадывать его по имени. Сохранённых копий тоже нет.",
-                parent=win)
+        bar=tk.Frame(win,bg="#101B2D")
+        bar.pack(fill="x",padx=16,pady=(0,12))
+        for label,cmd,primary in (
+                ("▧  Копировать в папку…",lambda:export_images(False),True),
+                ("⇢  Переместить в папку…",lambda:export_images(True),False),
+                ("Посмотреть",view,False),
+                ("Открыть папку",reveal,False),
+                ("Копировать путь",copy_path,False)):
+            self.btn(bar,label,cmd,primary).pack(side="left",padx=3)
+        self.btn(bar,"Закрыть",win.destroy).pack(side="right",padx=3)
+        display_rows()
+        if items:tr.selection_set("0")
+        else:
+            hint.config(text="Нет привязанных изображений. Открой генерацию с референсами "
+                             "и нажми «Обновить» в главном окне.")
 
     def open_folder(self):
         if not self.selected:return
