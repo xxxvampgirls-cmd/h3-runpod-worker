@@ -37,6 +37,33 @@ def run():
         assert key not in app.db["items"]
         assert key in app.db["promptTrash"]
         app.db["promptTrash"].pop(key,None)
+        # Real Tk original-images window must open, with an image linked to the
+        # completed run and no copying until its explicit UI action.
+        from PIL import Image
+        import tkinter as tk
+        with tempfile.TemporaryDirectory() as place:
+            photo=Path(place)/"original.png"
+            Image.new("RGB",(16,16),(50,110,180)).save(photo)
+            sample="fv:smoke-original-photo"
+            app.db["items"][sample]={
+                "id":sample,"source":"FreeVideo","title":"Image source smoke",
+                "prompt":"Still photo","sourceOriginals":[{"name":"original.png",
+                  "path":str(photo),"kind":"изображение","exists":True,"role":"first"}],
+                "sourceImages":[],"imageExports":[],"images":[]}
+            app.selected=sample
+            existing={w for w in app.winfo_children() if isinstance(w,tk.Toplevel)}
+            app.show_originals()
+            created=[w for w in app.winfo_children()
+                     if isinstance(w,tk.Toplevel) and w not in existing]
+            assert len(created)==1,"Original images dialog did not open"
+            dialog=created[0]
+            views=[w for w in dialog.winfo_children() if isinstance(w,tk.Frame)]
+            trees=[sub for frame in views for sub in frame.winfo_children()
+                   if sub.winfo_class()=="Treeview"]
+            assert trees and len(trees[0].get_children())==1,"Original not displayed"
+            dialog.destroy()
+            del app.db["items"][sample]
+            app.selected=None
         app.update_idletasks()
     finally:
         app.destroy()
