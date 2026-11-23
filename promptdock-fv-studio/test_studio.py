@@ -52,6 +52,88 @@ class FreeVideoSafetyTests(unittest.TestCase):
             info=inspect(str(base))
             self.assertEqual(info["working_estimate"],1024)
 
+    def test_original_picture_copy_and_name_collision(self):
+        from image_transfer import transfer_image
+        with tempfile.TemporaryDirectory() as temp:
+            base=Path(temp)
+            source=base/"ComfyUI"/"input"/"freevideo"/("a"*32)/"sample.jpg"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"first original 12345")
+            dest=base/"archive";dest.mkdir()
+            (dest/"sample.jpg").write_bytes(b"existing - must not overwrite")
+            copy=transfer_image(source,dest)
+            self.assertEqual(copy["operation"],"copy")
+            self.assertEqual(Path(copy["destination"]).name,"sample (2).jpg")
+            self.assertEqual(Path(copy["destination"]).read_bytes(),source.read_bytes())
+            self.assertEqual((dest/"sample.jpg").read_bytes(),b"existing - must not overwrite")
+            self.assertTrue(source.exists())
+            self.assertEqual(copy["original"],str(source))
+            self.assertTrue((source.parent/"sample.jpg").is_file())
+
+    def test_original_picture_move_only_trashes_verified_source(self):
+        from image_transfer import transfer_image
+        import shutil
+        with tempfile.TemporaryDirectory() as temp:
+            base=Path(temp)
+            original=base/"input"/"freevideo"/("f"*32)/"frame.png"
+            original.parent.mkdir(parents=True)
+            original.write_bytes(b"original byte content")
+            workflow=base/"output"/"FreeVideo"/"workflow.json"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text('{"file":"freevideo/'+("f"*32)+'/frame.png"}')
+            dest=base/"pictures";dest.mkdir()
+            trash=base/"recycle";trash.mkdir()
+            def simulate_trash(value):
+                shutil.move(value,trash/Path(value).name)
+            result=transfer_image(original,dest,move=True,trash=simulate_trash)
+            self.assertEqual(result["operation"],"move")
+            self.assertFalse(original.exists())
+            self.assertEqual((trash/"frame.png").read_bytes(),b"original byte content")
+            self.assertEqual((dest/"frame.png").read_bytes(),b"original byte content")
+            self.assertIn("freevideo/",workflow.read_text(),"FreeVideo workflow must never be changed")
+
+    def test_original_picture_move_fallback_to_copy_when_trash_rejected(self):
+        from image_transfer import transfer_image
+        with tempfile.TemporaryDirectory() as temp:
+            base=Path(temp)
+            original=base/"old"/"sample.webp"
+            original.parent.mkdir()
+            original.write_bytes(b"image data")
+            dest=base/"new";dest.mkdir()
+            def error_trash(_):
+                raise OSError("Windows Recycle Bin refused")
+            result=transfer_image(original,dest,move=True,trash=error_trash)
+            self.assertEqual(result["operation"],"copy")
+            self.assertTrue(original.exists())
+            self.assertTrue(Path(result["destination"]).is_file())
+            self.assertIn("Корзину",result["warning"])
+
+    def test_original_picture_transfer_protects_nonimages(self):
+        from image_transfer import transfer_image
+        with tempfile.TemporaryDirectory() as temp:
+            base=Path(temp)
+            folder=base/"output";folder.mkdir()
+            model=base/"h3.safetensors";model.write_bytes(b"model")
+            with self.assertRaises(ValueError):
+                transfer_image(model,folder)
+            picture=base/"original.jpg";picture.write_bytes(b"img")
+            with self.assertRaises(ValueError):
+                transfer_image(picture,base)
+            self.assertTrue(model.exists())
+            self.assertTrue(picture.exists())
+
+    def test_exported_originals_are_visible_after_rescan(self):
+        from studio import pics
+        with tempfile.TemporaryDirectory() as temp:
+            base=Path(temp)
+            source=base/"old.jpg"
+            archive=base/"archive.jpg"
+            archive.write_bytes(b"photo")
+            row={"sourceOriginals":[{"path":str(source),"exists":False,"kind":"изображение"}],
+                 "imageExports":[{"original":str(source),"destination":str(archive),
+                                  "operation":"move"}]}
+            self.assertIn(archive,pics(row))
+
     def test_originals_link_only_to_explicit_saved_assets(self):
         from reference_links import linked_originals
         with tempfile.TemporaryDirectory() as directory:
